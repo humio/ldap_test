@@ -14,12 +14,14 @@ object AuthenticationMethod extends Enumeration {
 
 case class LdapAuthConfig(domainName: Option[String], baseDN: Option[String],
                           base_env: Map[String, String], ldapAuthPrincipal: Option[String],
-                          bindName: Option[String], bindPassword: Option[String], bindFilterString: Option[String])
+                          bindName: Option[String], bindPassword: Option[String], bindFilterString: Option[String],
+                          groupDN: Option[String], groupFilter: Option[String]
+                         )
 
 object Main {
 
   val logger = Logger.getLogger(this.getClass.getName)
-  logger.addHandler( new ConsoleHandler() )
+  // logger.addHandler( new ConsoleHandler() )
 
   def main(args: Array[String]): Unit = {
 
@@ -55,11 +57,16 @@ object Main {
       }
       env += javax.naming.Context.INITIAL_CONTEXT_FACTORY ->  classOf[LdapCtxFactory].getName
       env += javax.naming.Context.SECURITY_AUTHENTICATION -> "simple"
+
+
+      val ldapGroupBaseDN = sys.env.get("LDAP_GROUP_BASE_DN")
+      val ldapGroupFilter = sys.env.get("LDAP_GROUP_FILTER")
+
       kind match {
         case AuthenticationMethod.Ldap =>
           val ldapAuthPrincipal = sys.env.get("LDAP_AUTH_PRINCIPAL")
           val ldapDomainName = sys.env.get("LDAP_DOMAIN_NAME")
-          Some(LdapAuthConfig(domainName = ldapDomainName, baseDN = None, base_env = env, ldapAuthPrincipal = ldapAuthPrincipal, bindName = None, bindPassword = None, bindFilterString = None))
+          Some(LdapAuthConfig(domainName = ldapDomainName, baseDN = None, base_env = env, ldapAuthPrincipal = ldapAuthPrincipal, bindName = None, bindPassword = None, bindFilterString = None, groupDN = ldapGroupBaseDN, groupFilter = ldapGroupFilter))
         case AuthenticationMethod.LdapSearch =>
           val slashIdx = ldapAuthProviderUrl.get.indexOf("/")
           val baseFromUrl = if (slashIdx > 0) {
@@ -72,7 +79,7 @@ object Main {
           val ldapDomainName = sys.env.get("LDAP_DOMAIN_NAME").orElse(sys.env.get("LDAP_SEARCH_DOMAIN_NAME"))
           val ldapBaseDN = sys.env.getOrElse("LDAP_SEARCH_BASE_DN", baseFromUrl)
           val bindFilterString = sys.env.get("LDAP_SEARCH_FILTER")
-          Some(LdapAuthConfig(domainName = ldapDomainName, baseDN = Some(ldapBaseDN), base_env = env, ldapAuthPrincipal = None, bindName = bindName, bindPassword = bindPassword, bindFilterString = bindFilterString))
+          Some(LdapAuthConfig(domainName = ldapDomainName, baseDN = Some(ldapBaseDN), base_env = env, ldapAuthPrincipal = None, bindName = bindName, bindPassword = bindPassword, bindFilterString = bindFilterString, groupDN = ldapGroupBaseDN, groupFilter = ldapGroupFilter))
         case _ =>
           None
       }
@@ -99,7 +106,7 @@ object Main {
         val controls = new SearchControls()
         controls.setSearchScope(SearchControls.SUBTREE_SCOPE);
         val env = ldapEnv(conf.bindName.get, conf.bindPassword.get)
-        val args: Array[AnyRef] = Seq(arg).toArray
+        val args: Array[AnyRef] = Array(arg)
         val ctx = new InitialDirContext(env)
         try {
           val r = ctx.search(baseDN, filter, args, controls)
@@ -125,7 +132,7 @@ object Main {
     val samAccountName = userPrincipalName.substring(0, userPrincipalName.indexOf('@'))
     if (conf.bindFilterString.nonEmpty) {
       val filter: String = conf.bindFilterString.get
-      searchOne(filter, userPrincipalName)
+      searchOne(filter, samAccountName)
     } else {
       val filter1: String = "(& (userPrincipalName={0})(objectCategory=user))"
       val filter2: String = "(& (sAMAccountName={0})(objectCategory=user))"
@@ -136,8 +143,80 @@ object Main {
     }
   }
 
+
+  def groupsForUser(uName: String, secret: String) : Option[Set[String]] = {
+
+    val dn = if (conf.bindName.nonEmpty) {
+      // We must bind using bindName/pass to search for the user, then use the DN we find in the actual login.
+      searchStep(uName)
+    } else {
+      // Direct bind using provided input from user:
+      conf.ldapAuthPrincipal match {
+        case Some(s) => Some(s.replace("HUMIOUSERNAME", uName))
+        case _ => Some(uName)
+      }
+    }
+
+    if (dn.isEmpty) {
+      None
+    } else {
+
+      var groups = Set[String]()
+
+      try {
+        val env = ldapEnv(dn.get, secret)
+        val ctx = new InitialDirContext(env)
+        try {
+
+          val groupFilter = conf.groupFilter.getOrElse("(& (objectClass=group) (member:1.2.840.113556.1.4.1941:={0}))")
+          val groupBaseDN = conf.groupDN.getOrElse(dn.get)
+          val searchGroupSubtree = true
+
+          import javax.naming.directory.SearchControls
+          val sc = new SearchControls
+          if (searchGroupSubtree)
+            sc.setSearchScope(SearchControls.SUBTREE_SCOPE)
+          val answer = ctx.search(groupBaseDN, groupFilter, Seq(dn.get).toArray[AnyRef], sc)
+
+
+          while (answer.hasMore) {
+            val sr = answer.next
+            val name = sr.getNameInNamespace
+            logger.log(Level.INFO, "*** Inspecting group \"" + name + "\" for user " + uName)
+            groups = groups + name
+          }
+
+
+        } finally {
+          ctx.close()
+        }
+        logger.info(s"Ldap login as user=${uName} dn=${dn} succeeded.")
+        Some(groups)
+
+      } catch {
+        case e: javax.naming.AuthenticationException =>
+          logger.log(Level.INFO, s"Ldap login as user=${uName} dn=${dn} rejected.", e)
+          None
+        case e: Throwable =>
+          logger.log(Level.WARNING, "Ldap authentication failed", e)
+          None
+      }
+    }
+  }
+
   def login(uName: String, pass: String): Option[String] = {
     if (check(uName, pass)) {
+
+      println("*** LOGIN SUCCEEDED *** ")
+
+      groupsForUser(uName, pass) match {
+        case None => println("*** NO GROUPS FOUND ***")
+        case Some(set) =>
+          println("*** GROUPS ***")
+          for (g <- set) {
+            println( "\"" + g + "\"")
+          }
+      }
 
       Some("success!")
 
