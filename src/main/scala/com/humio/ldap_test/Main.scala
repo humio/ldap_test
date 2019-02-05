@@ -37,7 +37,15 @@ object Main {
     }
   }
 
-  val conf = ldapConfigFromEnv(AuthenticationMethod.LdapSearch) match {
+  val kind = sys.env.get("AUTHENTICATION_METHOD") match {
+    case Some("ldap") => AuthenticationMethod.Ldap
+    case Some("ldap-search") => AuthenticationMethod.LdapSearch
+    case other =>
+      logger.info(s"""unknown/supported authentication kind "${other}", using "ldap-search" """)
+      AuthenticationMethod.LdapSearch
+  }
+
+  val conf = ldapConfigFromEnv(kind) match {
     case None =>
       throw new RuntimeException("ldap provider url is required for ldap auth.")
     case Some(cfg) =>
@@ -66,12 +74,16 @@ object Main {
       val ldapGroupBaseDN = sys.env.get("LDAP_GROUP_BASE_DN")
       val ldapGroupFilter = sys.env.get("LDAP_GROUP_FILTER")
 
+      val ldapAuthPrincipal = sys.env.get("LDAP_AUTH_PRINCIPAL")
+      val ldapDomainName = sys.env.get("LDAP_DOMAIN_NAME")
+
       kind match {
         case AuthenticationMethod.Ldap =>
-          val ldapAuthPrincipal = sys.env.get("LDAP_AUTH_PRINCIPAL")
-          val ldapDomainName = sys.env.get("LDAP_DOMAIN_NAME")
+          logger.info("authentication method: ldap")
           Some(LdapAuthConfig(domainName = ldapDomainName, baseDN = None, base_env = env, ldapAuthPrincipal = ldapAuthPrincipal, bindName = None, bindPassword = None, bindFilterString = None, groupDN = ldapGroupBaseDN, groupFilter = ldapGroupFilter))
+
         case AuthenticationMethod.LdapSearch =>
+          logger.info("authentication method: ldap-search")
           val slashIdx = ldapAuthProviderUrl.get.indexOf("/")
           val baseFromUrl = if (slashIdx > 0) {
             ldapAuthProviderUrl.get.substring(slashIdx)
@@ -192,14 +204,20 @@ object Main {
 
     val (dn, searchAfterBind) = if (conf.bindName.nonEmpty) {
       // We must bind using bindName/pass to search for the user, then use the DN we find in the actual login.
+      logger.info(s"bindName=${conf.bindName.get} uName=${uName}")
       (searchStep(uName), true)
     } else {
       // Direct bind using provided input from user:
       conf.ldapAuthPrincipal match {
-        case Some(s) => (Some(s.replace("HUMIOUSERNAME", uName)), false)
-        case _ => (Some(uName), false)
+        case Some(s) =>
+          logger.info(s"bindName was empty, so using s=${s} uName=${uName} to build dn")
+          (Some(s.replace("HUMIOUSERNAME", uName)), false)
+        case None =>
+          logger.info(s"bindName was empty, ldapAuthPrincipal was None, using ${uName}")
+          (Some(uName), false)
       }
     }
+    logger.info(s"dn=${dn}")
     if (dn.nonEmpty) {
       try {
         val env = ldapEnv(dn.get, secret)
@@ -237,14 +255,20 @@ object Main {
 
     val dn = if (conf.bindName.nonEmpty) {
       // We must bind using bindName/pass to search for the user, then use the DN we find in the actual login.
+      logger.info(s"bindName=${conf.bindName.get} uName=${uName}")
       searchStep(uName)
     } else {
       // Direct bind using provided input from user:
       conf.ldapAuthPrincipal match {
-        case Some(s) => Some(s.replace("HUMIOUSERNAME", uName))
-        case _ => Some(uName)
+        case Some(s) =>
+          logger.info(s"bindName was empty, so using s=${s} uName=${uName} to build dn")
+          Some(s.replace("HUMIOUSERNAME", uName))
+        case None =>
+          logger.info(s"bindName was empty, ldapAuthPrincipal was None, using ${uName}")
+          Some(uName)
       }
     }
+    logger.info(s"dn=${dn}")
 
     if (dn.isEmpty) {
       None
@@ -297,14 +321,17 @@ object Main {
 
   private def getPrincipalName(conf: LdapAuthConfig, username: String): String = {
     val domainName: String = conf.domainName.getOrElse("")
+    logger.info(s"domainName=${domainName} username=${username}")
     val slash = username.indexOf('\\')
-    if (slash >= 0) {
+    val name = if (slash >= 0) {
       username.substring(slash + 1) + '@' + domainName
     } else if (username.contains("@")) {
       username
     } else {
       username + '@' + domainName
     }
+    logger.info(s"principalName=${name}")
+    name
   }
 
   def createLoggerFor(string: String, file: Option[String] = None): ch.qos.logback.classic.Logger = {
