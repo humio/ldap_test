@@ -148,7 +148,7 @@ object Main {
       }
     }
 
-    val userPrincipalName = getPrincipalName(conf, uName)
+    val userPrincipalName = getPrincipalName(uName, conf)
     val samAccountName = userPrincipalName.substring(0, userPrincipalName.indexOf('@'))
     if (conf.bindFilterString.nonEmpty) {
       val filter: String = conf.bindFilterString.get
@@ -319,7 +319,7 @@ object Main {
     }
   }
 
-  private def getPrincipalName(conf: LdapAuthConfig, username: String): String = {
+  private def getPrincipalName(username: String, conf: LdapAuthConfig): String = {
     val domainName: String = conf.domainName.getOrElse("")
     logger.info(s"domainName=${domainName} username=${username}")
     val slash = username.indexOf('\\')

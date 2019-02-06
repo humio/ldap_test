@@ -47,6 +47,7 @@ or just `sbt graalvm-native-image:packageBin
 add to /etc/hosts on the line with `127.0.0.1  localhost` add `ldap.example.com`
 test with `dig +short ldap.example.com` and expect to see `127.0.0.1`
 `docker run --name ldap --hostname ldap.example.com --env LDAP_ORGANISATION="Example Company" --env LDAP_DOMAIN="example.com" --env LDAP_ADMIN_PASSWORD="password" --detach osixia/openldap:latest --loglevel debug`
+`docker logs -f $(docker ps -aqf "name=ldap")`
 insert a user
 `docker exec $(docker ps -aqf "name=ldap") ldapadd -x -D "cn=admin,dc=example,dc=com" -f /container/service/slapd/assets/test/new-user.ldif -H ldap://ldap.example.com -w password -ZZ`
 
