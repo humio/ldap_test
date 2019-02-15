@@ -103,7 +103,7 @@ object Main {
   }
 
   private def ldapEnv(dn: String, secret: String) = {
-    logger.info(s"LDAP env dn=${dn}; hash(secret)=${secret.hashCode}")
+    logger.info(s"ldap env dn=${dn}; hash(secret)=${secret.hashCode}")
     var env = conf.base_env
     env += javax.naming.Context.SECURITY_PRINCIPAL -> dn
     env += javax.naming.Context.SECURITY_CREDENTIALS -> secret
@@ -112,7 +112,7 @@ object Main {
     hashTable
   }
 
-  private def searchStep(uName: String): Option[String] = {
+  private def searchStep(username: String): Option[String] = {
     val baseDN: String = conf.ldapSearchBaseDN.getOrElse("")
 
     def searchOne(filter: String, arg: String): Option[String] = {
@@ -123,14 +123,14 @@ object Main {
         val args: Array[AnyRef] = Seq(arg).toArray
         val ctx = new InitialDirContext(env)
         try {
-          logger.info(s"LDAP search: base=${baseDN}; filter=${filter}; args=${args.toList}")
+          logger.info(s"ldap search: base=${baseDN}; filter=${filter}; args=${args.toList}")
 
           val r = ctx.search(baseDN, filter, args, controls)
           if (r.hasMore) {
             val searchResult = r.next
             val attrs = searchResult.getAttributes
             val name = searchResult.getNameInNamespace
-            logger.info(s"Ldap searching for arg=${arg} in ldapSearchBaseDN=${baseDN} with filter=${filter} got name=${name}")
+            logger.info(s"ldap searching for arg=${arg} in ldapSearchBaseDN=${baseDN} with filter=${filter} got name=${name}")
             Some(name)
           } else {
             None
@@ -140,12 +140,14 @@ object Main {
         }
       } catch {
         case e: Exception =>
-          logger.warn(s"Ldap searching as user=${conf.ldapSearchBindName.get} rejected.", e)
+          // We try two different methods when searching, frequently one fails.  Writing warnings to the
+          // log with exception only confuses people.
+          logger.info(s"ldap searching as user=${conf.ldapSearchBindName.get} was rejected.")
           None
       }
     }
 
-    val userPrincipalName = getPrincipalName(uName, conf)
+    val userPrincipalName = getPrincipalName(username, conf)
     val samAccountName = userPrincipalName.substring(0, userPrincipalName.indexOf('@'))
     if (conf.ldapSearchFilter.nonEmpty) {
       val filter: String = conf.ldapSearchFilter.get
@@ -159,13 +161,13 @@ object Main {
       }
     }
   }
+
   /*
-  override def login(username: String, pass: String, optionals: RequestOptionals): Try[String] = {
-    val principalUsername = getPrincipalName(username, conf)
-    if (check(principalUsername, pass)) {
-      val profile = AuthProviderProfile(provider = "Static", authProviderUsername = principalUsername, humioUsername = principalUsername, email = None)
+    override def login(username: String, pass: String, optionals: RequestOptionals): Try[String] = {
+    if (check(username, pass)) {
+      val profile = AuthProviderProfile(provider = "Static", authProviderUsername = getPrincipalName(username, conf), humioUsername = username, email = None)
       val groups = if (config.autoUpdateGroupMembershipsOnSuccessfullLogin) {
-        groupsForUser(principalUsername, pass).getOrElse(Set()).toSeq
+        groupsForUser(username, pass).getOrElse(Set()).toSeq
       } else {
         Seq()
       }
@@ -177,11 +179,8 @@ object Main {
   */
 
   def login(username: String, pass: String): Boolean = {
-    val principalUsername = getPrincipalName(username, conf)
-    if (check(principalUsername, pass)) {
-
+    if (check(username, pass)) {
       logger.info("login succeeded")
-
       groupsForUser(username, pass) match {
         case None =>
           logger.info("no groups found")
@@ -198,20 +197,23 @@ object Main {
     }
   }
 
-  private def check(uName: String, secret: String): Boolean = {
-    logger.info(s"Ldap login for user=${uName} starting...")
+  private def check(username: String, secret: String): Boolean = {
+    logger.info(s"ldap login for user=${username} starting...")
 
     val (dn, searchAfterBind) = if (conf.ldapSearchBindName.nonEmpty) {
       // We must bind using ldapSearchBindName/pass to search for the user, then use the DN we find in the actual login.
-      (searchStep(uName), true)
+      (searchStep(username), true)
     } else {
       // Direct bind using provided input from user:
       conf.ldapAuthPrincipal match {
-        case Some(s) => (Some(s.replace("HUMIOUSERNAME", uName)), false)
-        case _ => (Some(uName), false)
+        case Some(s) =>
+          (Some(s.replace("HUMIOUSERNAME", username)), false)
+        case _ =>
+          (Some(getPrincipalName(username, conf)), false)
       }
     }
-    logger.info(s"check() inital dir context dn=${dn}")
+
+    logger.info(s"check() initial dir context dn=${dn}")
     if (dn.nonEmpty) {
       try {
         val env = ldapEnv(dn.get, secret)
@@ -219,28 +221,27 @@ object Main {
         try {
           if (searchAfterBind) {
             // Try a search - it throws if we are not properly logged in.
-
             val baseDN = dn.get
             val filter = "(& (dn={0})(objectCategory=user))"
             val args = Seq(dn.get).toArray[AnyRef]
-            logger.info(s"LDAP search: base=${baseDN}; filter=${filter}; args=${args.toList}")
+            logger.info(s"ldap search: base=${baseDN}; filter=${filter}; args=${args.toList}")
             ctx.search(baseDN, filter, args, new SearchControls())
           }
         } finally {
           ctx.close()
         }
-        logger.info(s"Ldap login as user=${uName} dn=${dn} succeeded.")
+        logger.info(s"ldap login as user=${username} dn=${dn} succeeded.")
         true
       } catch {
         case e: javax.naming.AuthenticationException =>
-          logger.info(s"Ldap login as user=${uName} dn=${dn} rejected.", e)
+          logger.info(s"ldap login as user=${username} dn=${dn} rejected.", e)
           false
         case e: Throwable =>
           logger.warn("ldap authentication failed", e)
           false
       }
     } else {
-      logger.info(s"ldap login as user=${uName} dn=${dn} not tried as DN was not found")
+      logger.info(s"ldap login as user=${username} dn=${dn} not tried as DN was not found")
       false
     }
   }
@@ -252,10 +253,12 @@ object Main {
       searchStep(username)
     } else {
       // Direct bind using provided input from user:
-      conf.ldapAuthPrincipal match {
-        case Some(s) => Some(s.replace("HUMIOUSERNAME", username))
-        case _ => Some(username)
-      }
+      Option(conf.ldapAuthPrincipal match {
+        case Some(s) =>
+          s.replace("HUMIOUSERNAME", username)
+        case _ =>
+          getPrincipalName(username, conf)
+      })
     }
     logger.info(s"groupsForUser() dn=${dn}")
 
@@ -280,7 +283,7 @@ object Main {
             sc.setSearchScope(SearchControls.SUBTREE_SCOPE)
 
           val args = Seq(dn.get).toArray[AnyRef]
-          logger.info(s"LDAP search: base=${groupBaseDN}; filter=${groupFilter}; args=${args.toList}")
+          logger.info(s"ldap search: base=${groupBaseDN}; filter=${groupFilter}; args=${args.toList}")
 
           val answer = ctx.search(groupBaseDN, groupFilter, args, sc)
 
@@ -294,15 +297,15 @@ object Main {
         } finally {
           ctx.close()
         }
-        logger.info(s"Ldap login as user=${username} dn=${dn} succeeded.")
+        logger.info(s"ldap login as user=${username} dn=${dn} succeeded.")
         Some(groups)
 
       } catch {
         case e: javax.naming.AuthenticationException =>
-          logger.info(s"Ldap login as user=${username} dn=${dn} rejected.", e)
+          logger.info(s"ldap login as user=${username} dn=${dn} rejected.", e)
           None
         case e: Throwable =>
-          logger.warn("Ldap authentication failed", e)
+          logger.warn("ldap authentication failed", e)
           None
       }
     }
@@ -312,9 +315,7 @@ object Main {
     val domainName = conf.ldapDomainName.getOrElse("")
     val slash = username.indexOf('\\')
     val principalName =
-      if (conf.ldapLoginPattern.isDefined) {
-        conf.ldapLoginPattern.get.replace("HUMIOUSERNAME", username)
-      } else if (slash >= 0) {
+      if (slash >= 0) {
         username.substring(slash + 1) + '@' + domainName
       } else if (username.contains("@")) {
         username
