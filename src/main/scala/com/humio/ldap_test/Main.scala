@@ -16,10 +16,37 @@ object AuthenticationMethod extends Enumeration {
   val NoAuthentication, SingleUser, Auth0, Ldap, LdapSearch, Static, SetByProxy, FederatedIdentity, OAuth, SAML = Value
 }
 
-case class LdapAuthConfig(ldapDomainName: Option[String], ldapLoginPattern: Option[String], ldapSearchBaseDN: Option[String],
-  base_env: Map[String, String], ldapAuthPrincipal: Option[String],
-  ldapSearchBindName: Option[String], ldapSearchBindPassword: Option[String], ldapSearchFilter: Option[String],
-  ldapGroupBaseDN: Option[String], ldapGroupFilter: Option[String])
+case class LdapAuthConfig(ldapDomainName: Option[String],
+                          ldapSearchBaseDN: Option[String],
+                          base_env: Map[String, String],
+                          ldapAuthPrincipal: Option[String],
+                          ldapAuthPrincipalsRegex: Option[String],
+                          ldapSearchBindName: Option[String],
+                          ldapSearchBindPassword: Option[String],
+                          ldapSearchFilter: Option[String],
+                          ldapGroupBaseDN: Option[String],
+                          ldapGroupFilter: Option[String]) {
+  override def toString: String = {
+    s"LdapAuthConfig(" +
+      s"ldapDomainName=${ldapDomainName}, " +
+      s"ldapSearchBaseDN=${ldapSearchBaseDN}, " +
+      s"base_env=${base_env}, " +
+      s"ldapAuthPrincipal=${ldapAuthPrincipal}, " +
+      s"ldapAuthPrincipalsRegex=${ldapAuthPrincipalsRegex}" +
+      s"ldapSearchBindName=${ldapSearchBindName}, " +
+      s"ldapSearchBindPassword=${showExists(ldapSearchBindPassword)}" +
+      s"ldapSearchFilter=${ldapSearchFilter}, " +
+      s"ldapGroupBaseDN=${ldapGroupBaseDN}, " +
+      s"ldapGroupFilter=${ldapGroupFilter}, " +
+      s")"
+  }
+  private def showExists(str: Option[String]): Option[String] = {
+    str match {
+      case Some(s) => Some("XXXX")
+      case None => None
+    }
+  }
+}
 
 object Main {
 
@@ -67,21 +94,19 @@ object Main {
         }
 
       }
-      env += javax.naming.Context.INITIAL_CONTEXT_FACTORY -> classOf[LdapCtxFactory].getName
-      env += javax.naming.Context.SECURITY_AUTHENTICATION -> "simple"
 
       val ldapDomainName = sys.env.get("LDAP_DOMAIN_NAME").orElse(env.get("LDAP_SEARCH_DOMAIN_NAME"))
-      val ldapLoginPattern = sys.env.get("LDAP_LOGIN_PATTERN")
       val ldapGroupBaseDN = sys.env.get("LDAP_GROUP_BASE_DN")
       val ldapGroupFilter = sys.env.get("LDAP_GROUP_FILTER")
-      val ldapAuthPrincipal = sys.env.get("LDAP_AUTH_PRINCIPAL")
+
+      env += javax.naming.Context.INITIAL_CONTEXT_FACTORY -> "com.sun.jndi.ldap.LdapCtxFactory"
+      env += javax.naming.Context.SECURITY_AUTHENTICATION -> "simple"
       kind match {
         case AuthenticationMethod.Ldap =>
-          logger.info("authentication method: ldap")
-          Some(LdapAuthConfig(ldapDomainName = ldapDomainName, ldapLoginPattern = ldapLoginPattern, ldapSearchBaseDN = None, base_env = env, ldapAuthPrincipal = ldapAuthPrincipal, ldapSearchBindName = None, ldapSearchBindPassword = None, ldapSearchFilter = None, ldapGroupBaseDN = ldapGroupBaseDN, ldapGroupFilter = ldapGroupFilter))
-
+          val ldapAuthPrincipal = sys.env.get("LDAP_AUTH_PRINCIPAL")
+          val ldapAuthPrincipalsRegex = sys.env.get("LDAP_AUTH_PRINCIPALS_REGEX")
+          Some(LdapAuthConfig(ldapDomainName = ldapDomainName, ldapSearchBaseDN = None, base_env = env, ldapAuthPrincipal = ldapAuthPrincipal, ldapAuthPrincipalsRegex = ldapAuthPrincipalsRegex, ldapSearchBindName = None, ldapSearchBindPassword = None, ldapSearchFilter = None, ldapGroupBaseDN = ldapGroupBaseDN, ldapGroupFilter = ldapGroupFilter))
         case AuthenticationMethod.LdapSearch =>
-          logger.info("authentication method: ldap-search")
           val slashIdx = ldapAuthProviderUrl.get.indexOf("/")
           val baseFromUrl = if (slashIdx > 0) {
             ldapAuthProviderUrl.get.substring(slashIdx)
@@ -92,17 +117,19 @@ object Main {
           val ldapSearchBindPassword = sys.env.get("LDAP_SEARCH_BIND_PASSWORD")
           val ldapSearchBaseDN = sys.env.getOrElse("LDAP_SEARCH_BASE_DN", baseFromUrl)
           val ldapSearchFilter = sys.env.get("LDAP_SEARCH_FILTER")
-          Some(LdapAuthConfig(ldapDomainName = ldapDomainName, ldapLoginPattern = ldapLoginPattern, ldapSearchBaseDN = Some(ldapSearchBaseDN), base_env = env, ldapAuthPrincipal = None, ldapSearchBindName = ldapSearchBindName, ldapSearchBindPassword = ldapSearchBindPassword, ldapSearchFilter = ldapSearchFilter, ldapGroupBaseDN = ldapGroupBaseDN, ldapGroupFilter = ldapGroupFilter))
+          Some(LdapAuthConfig(ldapDomainName = ldapDomainName, ldapSearchBaseDN = Some(ldapSearchBaseDN), base_env = env, ldapAuthPrincipal = None, ldapAuthPrincipalsRegex = None, ldapSearchBindName = ldapSearchBindName, ldapSearchBindPassword = ldapSearchBindPassword, ldapSearchFilter = ldapSearchFilter, ldapGroupBaseDN = ldapGroupBaseDN, ldapGroupFilter = ldapGroupFilter))
         case _ =>
           None
       }
     } else {
-      logger.info("no LDAP_AUTH_PROVIDER_URL")
       None
     }
   }
 
   private def ldapEnv(dn: String, secret: String) = {
+    if (dn.isEmpty || secret.isEmpty) {
+      throw new javax.naming.AuthenticationException("Missing credentials")
+    }
     logger.info(s"ldap env dn=${dn}; hash(secret)=${secret.hashCode}")
     var env = conf.base_env
     env += javax.naming.Context.SECURITY_PRINCIPAL -> dn
@@ -164,103 +191,96 @@ object Main {
 
   /*
     override def login(username: String, pass: String, optionals: RequestOptionals): Try[String] = {
-    if (check(username, pass)) {
-      val profile = AuthProviderProfile(provider = "Static", authProviderUsername = getPrincipalName(username, conf), humioUsername = username, email = None)
-      val groups = if (config.autoUpdateGroupMembershipsOnSuccessfullLogin) {
-        groupsForUser(username, pass).getOrElse(Set()).toSeq
-      } else {
-        Seq()
-      }
-      loginService.login(profile, optionals, groups)
-    } else {
+    if (username.isBlank) {
+      logger.info(s"missing username in login request")
       LocalLogin.loginFailure
+    } else {
+      val dn = check(username, pass)
+      if (dn.isDefined) {
+        val principalName = getPrincipalName(username, conf)
+        val profile = AuthProviderProfile(provider = "Static", authProviderUsername = principalName, humioUsername = principalName, email = None)
+        val groups = if (config.autoUpdateGroupMembershipsOnSuccessfullLogin) {
+          groupsForUser(username, dn, pass).getOrElse(Set()).toSeq
+        } else {
+          Seq()
+        }
+        loginService.login(profile, optionals, groups)
+      } else {
+        LocalLogin.loginFailure
+      }
     }
   }
   */
 
   def login(username: String, pass: String): Boolean = {
-    if (check(username, pass)) {
-      logger.info("login succeeded")
-      groupsForUser(username, pass) match {
-        case None =>
-          logger.info("no groups found")
-          false
-        case Some(set) =>
-          logger.info(s"groups found: ${set.size}")
-          for (g <- set) {
-            logger.info("\"" + g + "\"")
-          }
-          true
-      }
-    } else {
+    if (username.isBlank) {
+      logger.info(s"missing username in login request")
       false
+    } else {
+      val dn = check(username, pass)
+      if (dn.isDefined) {
+        logger.info("login succeeded")
+        groupsForUser(username, dn, pass) match {
+          case None =>
+            logger.info("no groups found")
+            false
+          case Some(set) =>
+            logger.info(s"groups found: ${set.size}")
+            for (g <- set) {
+              logger.info("\"" + g + "\"")
+            }
+            true
+        }
+      } else {
+        false
+      }
     }
   }
 
-  private def check(username: String, secret: String): Boolean = {
+  private def check(username: String, secret: String): Option[String] = {
     logger.info(s"ldap login for user=${username} starting...")
 
-    val (dn, searchAfterBind) = if (conf.ldapSearchBindName.nonEmpty) {
-      // We must bind using ldapSearchBindName/pass to search for the user, then use the DN we find in the actual login.
-      (searchStep(username), true)
-    } else {
-      // Direct bind using provided input from user:
-      conf.ldapAuthPrincipal match {
-        case Some(s) =>
-          (Some(s.replace("HUMIOUSERNAME", username)), false)
-        case _ =>
-          (Some(getPrincipalName(username, conf)), false)
-      }
+    // The user is permitted to provide more than one auth principal separated by the a pattern defined as a regex.
+    val splitPrincipalsPattern = sys.env.get("LDAP_AUTH_PRINCIPALS_REGEX")
+    val ldapAuthPrincipals = conf.ldapAuthPrincipal match {
+      case Some(principals) if principals.nonEmpty && splitPrincipalsPattern.isDefined =>
+        principals.split(splitPrincipalsPattern.get).map(_.replace("HUMIOUSERNAME", username)).seq
+      case _ =>
+        Seq(getPrincipalName(username, conf))
     }
 
-    logger.info(s"check() initial dir context dn=${dn}")
-    if (dn.nonEmpty) {
+    val DNs = if (conf.ldapSearchBindName.nonEmpty) {
+      // We must bind using ldapSearchBindName/pass to search for the user, then use the DN we find in the actual login.
+      searchStep(username) match {
+        case Some(dn) => Seq(dn)
+        case None =>
+          logger.info(s"searched for DN to use for login as user=${username} but was unable to find one")
+          Seq.empty
+      }
+    } else {
+      ldapAuthPrincipals
+    }
+
+    DNs.map((dn: String) => {
       try {
-        val env = ldapEnv(dn.get, secret)
+        val env = ldapEnv(dn, secret)
         val ctx = new InitialDirContext(env)
-        try {
-          if (searchAfterBind) {
-            // Try a search - it throws if we are not properly logged in.
-            val baseDN = dn.get
-            val filter = "(& (dn={0})(objectCategory=user))"
-            val args = Seq(dn.get).toArray[AnyRef]
-            logger.info(s"ldap search: base=${baseDN}; filter=${filter}; args=${args.toList}")
-            ctx.search(baseDN, filter, args, new SearchControls())
-          }
-        } finally {
-          ctx.close()
-        }
-        logger.info(s"ldap login as user=${username} dn=${dn} succeeded.")
-        true
+        ctx.close()
+        logger.info(s"ldap login as user=${username} dn=${dn} succeeded")
+        dn
       } catch {
         case e: javax.naming.AuthenticationException =>
-          logger.info(s"ldap login as user=${username} dn=${dn} rejected.", e)
-          false
+          logger.info(s"ldap login as user=${username} dn=${dn} rejected: ${e.getMessage}")
+          ""
         case e: Throwable =>
-          logger.warn("ldap authentication failed", e)
-          false
+          //ExceptionUtils.rethrowIfFatal(e)
+          logger.warn(s"ldap authentication failed: ${e.getMessage}")
+          ""
       }
-    } else {
-      logger.info(s"ldap login as user=${username} dn=${dn} not tried as DN was not found")
-      false
-    }
+    }) collectFirst { case dn if !dn.isBlank() => dn }
   }
 
-  def groupsForUser(username: String, secret: String): Option[Set[String]] = {
-
-    val dn = if (conf.ldapSearchBindName.nonEmpty) {
-      // We must bind using ldapSearchBindName/pass to search for the user, then use the DN we find in the actual login.
-      searchStep(username)
-    } else {
-      // Direct bind using provided input from user:
-      Option(conf.ldapAuthPrincipal match {
-        case Some(s) =>
-          s.replace("HUMIOUSERNAME", username)
-        case _ =>
-          getPrincipalName(username, conf)
-      })
-    }
-    logger.info(s"groupsForUser() dn=${dn}")
+  def groupsForUser(username: String, dn: Option[String], secret: String): Option[Set[String]] = {
 
     if (dn.isEmpty) {
       None
@@ -305,6 +325,7 @@ object Main {
           logger.info(s"ldap login as user=${username} dn=${dn} rejected.", e)
           None
         case e: Throwable =>
+          //ExceptionUtils.rethrowIfFatal(e)
           logger.warn("ldap authentication failed", e)
           None
       }
