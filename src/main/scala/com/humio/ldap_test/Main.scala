@@ -243,8 +243,8 @@ object Main {
     // The user is permitted to provide more than one auth principal separated by the a pattern defined as a regex.
     val splitPrincipalsPattern = sys.env.get("LDAP_AUTH_PRINCIPALS_REGEX")
     val ldapAuthPrincipals = conf.ldapAuthPrincipal match {
-      case Some(principals) if principals.nonEmpty && splitPrincipalsPattern.isDefined =>
-        principals.split(splitPrincipalsPattern.get).map(_.replace("HUMIOUSERNAME", username)).seq
+      case Some(principals) if principals.nonEmpty && conf.ldapAuthPrincipalsRegex.isDefined =>
+        principals.split(conf.ldapAuthPrincipalsRegex.get).map(_.replace("HUMIOUSERNAME", username)).seq
       case _ =>
         Seq(getPrincipalName(username, conf))
     }
@@ -261,23 +261,23 @@ object Main {
       ldapAuthPrincipals
     }
 
-    DNs.map((dn: String) => {
+    DNs collectFirst { case dn if {
       try {
         val env = ldapEnv(dn, secret)
         val ctx = new InitialDirContext(env)
         ctx.close()
         logger.info(s"ldap login as user=${username} dn=${dn} succeeded")
-        dn
+        true
       } catch {
         case e: javax.naming.AuthenticationException =>
           logger.info(s"ldap login as user=${username} dn=${dn} rejected: ${e.getMessage}")
-          ""
+          false
         case e: Throwable =>
           //ExceptionUtils.rethrowIfFatal(e)
           logger.warn(s"ldap authentication failed: ${e.getMessage}")
-          ""
+          false
       }
-    }) collectFirst { case dn if !dn.isBlank() => dn }
+    } => dn }
   }
 
   def groupsForUser(username: String, dn: Option[String], secret: String): Option[Set[String]] = {
