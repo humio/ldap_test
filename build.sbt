@@ -12,7 +12,7 @@ lazy val root = (project in file(".")).
       organization := "com.humio",
       scalaVersion := "2.12.8",
 //      crossScalaVersions := Seq("2.12.7", "2.12.8", "2.13.0-RC1"),
-      version      := "0.3.0-SNAPSHOT"
+      version      := "0.4.0-SNAPSHOT"
     ))
     , name := "ldap-test"
 //    , libraryDependencies += scalaTest % Test
