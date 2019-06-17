@@ -119,7 +119,7 @@ object Main {
            |    Phase 2: Assuming the DN/password authenticated next up is determining if the user belongs to any
            |    groups.  The group membership is used for RBAC.
            |
-           |    Requires Java 11 or later.
+           |    Requires Java 11 or later.tig
          """.stripMargin)
     } else {
       logger.info(s"Testing LDAP login for user=${args(0)}")
