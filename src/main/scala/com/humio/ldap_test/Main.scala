@@ -156,19 +156,19 @@ object LdapBindLocalLogin {
     (ldapAuth.principals.map(_ match {
       case LdapNamedPrincipal(_, principal) =>
         Some(principal.replace("HUMIOUSERNAME", username))
-      case search: LdapPrincipalSearch =>
+      case LdapPrincipalSearch(username, password, dn, filter) => //search: LdapPrincipalSearch =>
         try {
           val controls = new SearchControls()
           controls.setSearchScope(SearchControls.SUBTREE_SCOPE)
-          val args: Array[AnyRef] = Seq(search.username).toArray
-          val ctx = new InitialDirContext(ldapEnv(url, search.dn, search.password, ldapAuth.conn.env))
+          val args: Array[AnyRef] = Seq(username).toArray
+          val ctx = new InitialDirContext(ldapEnv(url, dn, password, ldapAuth.conn.env))
           try {
-            logger.info(s"search: base=${search.dn} filter=${search.filter} args=${args.toList}")
-            val r = ctx.search(search.dn, search.filter, args, controls)
+            logger.info(s"search: base=${dn} filter=${filter} args=${args.toList}")
+            val r = ctx.search(dn, filter, args, controls)
             if (r.hasMore) {
               val searchResult = r.next
               val dn = searchResult.getNameInNamespace
-              logger.info(s"searching for user=${search.username} in dn=${search.dn} filter=${search.filter} got name=$dn")
+              logger.info(s"searching for user=${username} in dn=${dn} filter=${filter} got name=$dn")
               Some(dn)
             } else {
               None
@@ -179,7 +179,7 @@ object LdapBindLocalLogin {
         } catch {
           case e: NamingException =>
             // We may try many different combinations when searching so we expect some to fail.
-            logger.info(s"rejected dn=${search.dn} filter=${search.filter} args=${search.username} reason=${e.getMessage}")
+            logger.info(s"rejected dn=${dn} filter=${filter} args=${username} reason=${e.getMessage}")
             None
         }
     }) collectFirst {
@@ -191,9 +191,8 @@ object LdapBindLocalLogin {
           case e: javax.naming.AuthenticationException =>
             logger.info(s"login as user=${username} dn=${dn} rejected: ${e}")
             false
-          case e: Throwable =>
+          case ExceptionUtils.NonFatal(e) =>
             logger.warn(s"authentication failed: ${e}")
-            ExceptionUtils.rethrowIfFatal(e)
             false
         }
       } => Some((ctx, dn))
@@ -208,7 +207,7 @@ object LdapBindLocalLogin {
           logger.info(s"searching for the user=${username} groups within dn=${groupInfo.dn} using filter=${groupInfo.filter} and args=${args}")
           val groups = ctx.search(groupInfo.dn, groupInfo.filter, args, sc).asScala.collect { case group => group.getNameInNamespace }.toSeq
           if (groups.nonEmpty)
-            logger.info(s"dn=${dn} is a member of groups=${groups}")
+            logger.info(s"dn=${dn} is a member of groups=${groups.mkString("[", ", ", "]")}")
           (Some(dn), groups)
         } else {
           (Some(dn), Seq.empty[String])
@@ -303,13 +302,33 @@ object Main {
 }
 
 object ExceptionUtils {
-    def rethrowIfFatal(e: Throwable): Unit = {
-      e match {
-        case e: Error => throw e
-        // Other cases that need rethrow to start shutdown in particular?
-        case _ => //fine.
-      }
-    }
+
+  private val logger = Logger.forObject(this)
+
+  /** Defines what fatal means in our system! */
+  def isFatal(t: Throwable) = t match {
+    case _: StackOverflowError => false // We can recover from StackOverflowError even though it is a subclass of VirtualMachineError
+    case _: Error => true
+    case _ => false
+  }
+
+  def isNonFatal(t: Throwable) = !isFatal(t)
+
+  object Fatal {
+    /**
+     * Extractor for matching all fatal throwables.
+     * Fatal throwables are things that should result in JVM shutdown
+     */
+    def unapply(t: Throwable): Option[Throwable] = if (isFatal(t)) Some(t) else None
+  }
+
+  object NonFatal {
+    /**
+     * Extractor for matching all throwables that are non-fatal, meaning the JVM is in a sound state.
+     * (In a fatal situation the JVM should be shutdown immediately).
+     */
+    def unapply(t: Throwable): Option[Throwable] = if (isNonFatal(t)) Some(t) else None
+  }
 }
 
 object Logger {
