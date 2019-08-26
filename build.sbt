@@ -16,6 +16,8 @@ lazy val root = (project in file(".")).
     ))
     , name := "ldap-test"
 //    , libraryDependencies += scalaTest % Test
+    // Backports of scala.util classes from 2.13.x for Scala 2.12
+    , libraryDependencies += "com.github.bigwheel" %% "util-backports" % "2.0"
     , libraryDependencies += logging
     , libraryDependencies += logback
 

@@ -24,7 +24,7 @@ case class UnsecuredLdapConnection(url: String) extends LdapConnectionMethod(url
   require(url.startsWith("ldap:"), "The LDAP endpoint must begin with 'ldap:' not " + url.take(5))
 }
 case class SecuredLdapConnection(url: String, cert: Option[String] = None) extends LdapConnectionMethod(url) {
-  require(url.startsWith("ldaps:"), "The LDAPS (LDAP over TLS) endpoint must begin with 'ldaps:' not " + url.take(6))
+  require(url.startsWith("ldaps:"), "The LDAP over SSL/TLS endpoint must begin with 'ldaps:' not " + url.take(6))
 
   override def env(): Map[String, String] = {
     super.env ++
@@ -90,9 +90,11 @@ object LdapBindLocalLogin {
             val domain = ldapAuthConfig.ldapDomainName.getOrElse("")
             val principalName = getPrincipalName(username, domain)
             val ldapAuth = ldapAuthFromConfig(authenticationMethod, domain, ldapAuthConfig)
-            val profile = AuthProviderProfile(provider = "Static", authProviderUsername = principalName, humioUsername = principalName, email = None)
             openLdapContext(username, pass, ldapAuthConfig.ldapAuthProviderUrl.get, ldapAuth, ldapAuthConfig.ldapGroupBaseDN, ldapAuthConfig.ldapGroupFilter) match {
-              case (Some(_), groups) => true //loginService.login(profile, optionals, groups)
+              case (Some(_), groups) =>
+                val profile = AuthProviderProfile(provider = "Static", authProviderUsername = principalName, humioUsername = principalName, email = None)
+                logger.info(s"profile for loginService=$profile")
+                true //loginService.login(profile, optionals, groups)
               case _ => LocalLogin.loginFailure
             }
           }
@@ -123,7 +125,7 @@ object LdapBindLocalLogin {
               case (Some(name), Some(pass), Some(dn)) =>
                 ldapAuthConfig.ldapSearchFilter match {
                   case None =>
-                    val principalName = getPrincipalName(name, ldapAuthConfig.ldapSearchDomainName.get)
+                    val principalName = getPrincipalName(name, ldapAuthConfig.ldapSearchDomainName.getOrElse(domain))
                     Seq(
                       LdapPrincipalSearch(principalName, pass, dn, "(& (userPrincipalName={0})(objectCategory=user))"),
                       LdapPrincipalSearch(principalName.substring(0, principalName.indexOf('@')), pass, dn, "(& (sAMAccountName={0})(objectCategory=user))"))
@@ -161,7 +163,9 @@ object LdapBindLocalLogin {
           val controls = new SearchControls()
           controls.setSearchScope(SearchControls.SUBTREE_SCOPE)
           val args: Array[AnyRef] = Seq(username).toArray
-          val ctx = new InitialDirContext(ldapEnv(url, dn, password, ldapAuth.conn.env))
+          val env = ldapEnv(url, dn, password, ldapAuth.conn.env)
+          logger.info(s"initial dir context env=$env")
+          val ctx = new InitialDirContext(env)
           try {
             logger.info(s"search: base=${dn} filter=${filter} args=${args.toList}")
             val r = ctx.search(dn, filter, args, controls)
@@ -179,7 +183,7 @@ object LdapBindLocalLogin {
         } catch {
           case e: NamingException =>
             // We may try many different combinations when searching so we expect some to fail.
-            logger.info(s"rejected dn=${dn} filter=${filter} args=${username} reason=${e.getMessage}")
+            logger.info(s"rejected dn=${dn} filter=${filter} args=${username} reason=${e.getMessage}", e)
             None
         }
     }) collectFirst {
@@ -189,10 +193,10 @@ object LdapBindLocalLogin {
           true
         } catch {
           case e: javax.naming.AuthenticationException =>
-            logger.info(s"login as user=${username} dn=${dn} rejected: ${e}")
+            logger.info(s"login as user=${username} dn=${dn} rejected: ${e.getMessage}", e)
             false
           case ExceptionUtils.NonFatal(e) =>
-            logger.warn(s"authentication failed: ${e}")
+            logger.warn(s"authentication failed: ${e.getMessage}", e)
             false
         }
       } => Some((ctx, dn))
