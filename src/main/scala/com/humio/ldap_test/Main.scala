@@ -212,7 +212,6 @@ object LdapBindLocalLogin {
               logger.debug(s"searching for group memberships within ldap for user=$username dn=$dn within groupBaseDn=$groupBaseDn")
               val groupLookups = Seq(
                 LdapGroupLookup(groupBaseDn, ldapGroupFilter.getOrElse("(& (objectClass=group) (member:1.2.840.113556.1.4.1941:={0}))")),
-                LdapGroupLookup(groupBaseDn, ldapGroupFilter.getOrElse("(& (objectClass=group) (member:={0}))"))
               )
               val sc = new javax.naming.directory.SearchControls()
               sc.setSearchScope(SearchControls.SUBTREE_SCOPE)
