@@ -68,17 +68,17 @@ object LdapBindLocalLogin {
           logger.info("AUTHENTICATION_METHOD=LdapSearch")
           AuthenticationMethod.LdapSearch
         case Some(method) =>
-          logger.error(s"This tool tests LDAP authentication, not ${method}.")
+          logger.error(s"This tool tests LDAP authentication, not $method.")
           AuthenticationMethod.NoAuthentication
         case None =>
           logger.error(s"Missing environment variable AUTHENTICATION_METHOD")
           AuthenticationMethod.NoAuthentication
       }
       val ldapConfig = ldapConfigFromEnv()
-      logger.info(s"ldapAuthConfig=${ldapConfig}")
+      logger.info(s"ldapAuthConfig=$ldapConfig")
       ldapConfig match {
         case None => LocalLogin.loginFailure
-        case Some(ldapAuthConfig) => {
+        case Some(ldapAuthConfig) =>
           if (username.isBlank) {
             logger.info(s"missing username in login request")
             LocalLogin.loginFailure
@@ -97,7 +97,6 @@ object LdapBindLocalLogin {
               case _ => LocalLogin.loginFailure
             }
           }
-        }
       }
     }
   }
@@ -126,15 +125,15 @@ object LdapBindLocalLogin {
                   case None =>
                     Seq(
                       LdapPrincipalSearch(username, password, dn, "(& (userPrincipalName={0})(objectCategory=user))",
-                        (username) => getPrincipalName(username, ldapAuthConfig.ldapSearchDomainName.getOrElse(domain))),
+                        username => getPrincipalName(username, ldapAuthConfig.ldapSearchDomainName.getOrElse(domain))),
                       LdapPrincipalSearch(username, password, dn, "(& (sAMAccountName={0})(objectCategory=user))",
-                        (username) => {
+                        username => {
                           val principalName = getPrincipalName(username, ldapAuthConfig.ldapSearchDomainName.getOrElse(domain))
                           principalName.substring(0, principalName.indexOf('@'))
                         }))
                   case Some(filter) =>
                     Seq(LdapPrincipalSearch(username, password, dn, filter,
-                      (username) => getPrincipalName(username, ldapAuthConfig.ldapSearchDomainName.getOrElse(domain))))
+                      username => getPrincipalName(username, ldapAuthConfig.ldapSearchDomainName.getOrElse(domain))))
                 }
               case _ =>
                 logger.error(s"Missing information required to perform ldap-search. LDAP_SEARCH_BIND_NAME=${ldapAuthConfig.ldapSearchBindName} LDAP_SEARCH_BIND_PASSWORD=${if (ldapAuthConfig.ldapSearchBindPassword.isEmpty) "empty" else "redacted"} LDAP_SEARCH_BASE_DN=${ldapAuthConfig.ldapSearchBaseDN}")
@@ -225,12 +224,12 @@ object LdapBindLocalLogin {
                     case group => group.getNameInNamespace
                   }.toSeq
               } match {
-                case Some(groups) =>
+                case Some(groups) if groups.nonEmpty =>
                   logger.debug(s"user=$username dn=$dn is a member of ${groups.length} groups=${groups.mkString("[", ", ", "]")}")
                   (Some(dn), groups)
-                case None =>
+                case _ =>
                   logger.debug(s"user=$username dn=$dn was not associated with any groups")
-                  (None, Seq.empty[String])
+                  (Some(dn), Seq.empty[String])
               }
             case None =>
               (Some(dn), Seq.empty[String])
