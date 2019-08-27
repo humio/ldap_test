@@ -1,7 +1,7 @@
 # ldap_test
 Testing for LDAP integrations
 
-Simple tool for testing Humio LDAP configurations.
+This is a simple tool for testing Humio LDAP configurations.
 
 To invoke, run
 
@@ -9,8 +9,8 @@ To invoke, run
 > sbt "run $USER $PASSWORD"
 ```
 
-the environment should contain the relevant configurations for HUMIO LDAP login, as described in
-[the Humio documentation here](https://docs.humio.com/configuration/authentication/ldap/).
+The environment should contain the relevant configurations for HUMIO LDAP login, as described in
+[the Humio LDAP documentation](https://docs.humio.com/operations-guide/configuration/authentication/ldap/).
 
 Here is a sample environment:
 
