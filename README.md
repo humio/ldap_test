@@ -3,15 +3,6 @@
 Test code for LDAP integration with Humio. Provide the same environment settings to this tool and it will
 try to authenticate and fetch group membership from the LDAP (or ActiveDirectory) server you've specified.
 
-To invoke, run:
-
-```
-$ sbt "run $USER $PASSWORD"
-```
-
-the environment should contain the relevant configurations for HUMIO LDAP login, as described in
-[the Humio documentation here](https://docs.humio.com/configuration/authentication/ldap/).
-
 # Testing
 
 * Starting the test container with OpenLDAP and test data
@@ -253,4 +244,31 @@ $ env AUTHENTICATION_METHOD=ldap-search LDAP_DOMAIN_NAME=planetexpress.com LDAP_
 ```
 
 Cool.  We authenticated with the OpenLDAP instance using `admin`'s credentials and searched for `fry`'s DN then used
-that to find out that he's a member of the `ship_crew` group.  Our work is done.
+that to find out that he's a member of the `ship_crew` group.  Our work is done, but it could have been easier...
+
+# Docker test image of this repo
+
+When you configure Humio you'll add to a file in `/etc/humio` that has many configuration settings, some for LDAP.  All
+you have to do is run the docker image pre-built with the JAR from this repo and reference that configuration file in
+order to test using this tool.  Example config for LDAP is in
+https://github.com/humio/ldap-test-image/blob/master/.env.example`.
+
+The config read from the environment should contain the relevant configurations for Humio LDAP login, as described in
+[the Humio documentation here](https://docs.humio.com/configuration/authentication/ldap/).
+
+
+```shell script
+$ cat > .env <<EOF
+  AUTHENTICATION_METHOD=ldap-search
+  LDAP_DOMAIN_NAME=planetexpress.com
+  LDAP_AUTH_PROVIDER_URL="ldap://127.0.0.1:389"
+  LDAP_SEARCH_BIND_NAME="cn=admin,ou=people,dc=planetexpress,dc=com"
+  LDAP_SEARCH_BIND_PASSWORD="GoodNewsEveryone"
+  LDAP_SEARCH_FILTER="(& (mail={0}) (objectClass=person))"
+  LDAP_SEARCH_BASE_DN="ou=people,dc=planetexpress,dc=com"
+  LDAP_GROUP_BASE_DN="ou=people,dc=planetexpress,dc=com"
+  LDAP_GROUP_FILTER="(& (objectClass=Group) (member={0}))"
+  EOF
+$ docker pull humio/humio-ldap-test
+$ docker run -it --rm --env-file .env humio-ldap-test fry fry
+```
