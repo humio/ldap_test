@@ -12,36 +12,6 @@ import org.slf4j.LoggerFactory
 
 import scala.collection.JavaConverters._
 
-
-case class AuthProviderProfile(
-  provider: String,
-  authProviderUsername: String,
-  humioUsername: String,
-  email: Option[Option[String]] = None,
-  company: Option[Option[String]] = None,
-  location: Option[Option[String]] = None,
-  name: Option[Option[String]] = None,
-  isRoot: Option[Option[Boolean]] = None,
-  picture: Option[Option[String]] = None)
-
-object AuthenticationMethod extends Enumeration {
-  val NoAuthentication, SingleUser, Auth0, Ldap, LdapSearch, Static, SetByProxy, FederatedIdentity, OAuth, SAML = Value
-}
-
-case class LdapAuthConfig(
-  ldapAuthProviderUrl: Option[String],
-  ldapAuthProviderCert: Option[String],
-  ldapDomainName: Option[String],
-  ldapAuthPrincipal: Option[String],
-  ldapAuthPrincipalsRegex: Option[String],
-  ldapSearchBindName: Option[String],
-  ldapSearchBindPassword: Option[String],
-  ldapSearchBaseDN: Option[String],
-  ldapSearchDomainName: Option[String],
-  ldapSearchFilter: Option[String],
-  ldapGroupBaseDN: Option[String],
-  ldapGroupFilter: Option[String])
-
 sealed abstract class LdapConnectionMethod(url: String) {
   def env(): Map[String, String] = {
     Map(
@@ -54,7 +24,7 @@ case class UnsecuredLdapConnection(url: String) extends LdapConnectionMethod(url
   require(url.startsWith("ldap:"), "The LDAP endpoint must begin with 'ldap:' not " + url.take(5))
 }
 case class SecuredLdapConnection(url: String, cert: Option[String] = None) extends LdapConnectionMethod(url) {
-  require(url.startsWith("ldaps:"), "The LDAPS (LDAP over TLS) endpoint must begin with 'ldaps:' not " + url.take(6))
+  require(url.startsWith("ldaps:"), "The LDAP over SSL/TLS endpoint must begin with 'ldaps:' not " + url.take(6))
 
   override def env(): Map[String, String] = {
     super.env ++
@@ -62,30 +32,249 @@ case class SecuredLdapConnection(url: String, cert: Option[String] = None) exten
       javax.naming.Context.SECURITY_PROTOCOL -> Option("ssl"),
       cert match {
         case None => "" -> None
-        case Some(c) => {
+        case Some(c) =>
           SelfSignedSSLSocketFactory.setCertificate(c)
           "java.naming.ldap.factory.socket" -> Option(SelfSignedSSLSocketFactory.name())
-        }
       }
     ).filter(_._2.isDefined).mapValues(_.get)
   }
 }
 
-object LocalLogin {
-  val loginFailure = false
-}
-
 sealed abstract class LdapPrincipalLookup
 case class LdapNamedPrincipal(domain: String, principal: String) extends LdapPrincipalLookup
-case class LdapPrincipalSearch(username: String, password: String, dn: String, filter: String) extends LdapPrincipalLookup
+case class LdapPrincipalSearch(username: String, password: String, dn: String, filter: String, transformUsernameToPrincipal: (String) => String) extends LdapPrincipalLookup
 
 case class LdapAuth(conn: LdapConnectionMethod, principals: Seq[LdapPrincipalLookup])
 
 case class LdapGroupLookup(dn: String, filter: String)
 
+//class LdapBindLocalLogin(loginService: LoginService, config: Config) extends LocalLogin {
+object LdapBindLocalLogin {
+  private val logger = Logger.forObject(this)
+
+  def login(username: String, pass: String): Boolean = {
+    if (username.isBlank) {
+      logger.info(s"missing username in login request")
+      LocalLogin.loginFailure
+    } else if (pass.isBlank) {
+      logger.info(s"missing password in login request")
+      LocalLogin.loginFailure
+    } else {
+      val authenticationMethod = sys.env.get("AUTHENTICATION_METHOD") match {
+        case Some(method) if method.equals("ldap") =>
+          logger.info("AUTHENTICATION_METHOD=Ldap")
+          AuthenticationMethod.Ldap
+        case Some(method) if method.equals("ldap-search") =>
+          logger.info("AUTHENTICATION_METHOD=LdapSearch")
+          AuthenticationMethod.LdapSearch
+        case Some(method) =>
+          logger.error(s"This tool tests LDAP authentication, not $method.")
+          AuthenticationMethod.NoAuthentication
+        case None =>
+          logger.error(s"Missing environment variable AUTHENTICATION_METHOD")
+          AuthenticationMethod.NoAuthentication
+      }
+      val ldapConfig = ldapConfigFromEnv()
+      logger.info(s"ldapAuthConfig=$ldapConfig")
+      ldapConfig match {
+        case None => LocalLogin.loginFailure
+        case Some(ldapAuthConfig) =>
+          if (username.isBlank) {
+            logger.info(s"missing username in login request")
+            LocalLogin.loginFailure
+          } else if (pass.isBlank) {
+            logger.info(s"missing password in login request")
+            LocalLogin.loginFailure
+          } else {
+            val domain = ldapAuthConfig.ldapDomainName.getOrElse("")
+            val principalName = getPrincipalName(username, domain)
+            val ldapAuth = ldapAuthFromConfig(authenticationMethod, domain, ldapAuthConfig)
+            openLdapContext(username, pass, ldapAuthConfig.ldapAuthProviderUrl.get, ldapAuth, ldapAuthConfig.ldapGroupBaseDN, ldapAuthConfig.ldapGroupFilter) match {
+              case (Some(_), groups) =>
+                val profile = AuthProviderProfile(provider = "Static", authProviderUsername = principalName, humioUsername = principalName, email = None)
+                logger.info(s"profile for loginService=$profile")
+                true //loginService.login(profile, optionals, groups)
+              case _ => LocalLogin.loginFailure
+            }
+          }
+      }
+    }
+  }
+
+  private def ldapAuthFromConfig(kind: AuthenticationMethod.Value, domain: String, ldapAuthConfig: LdapAuthConfig): LdapAuth = {
+    val splitPrincipals = ldapAuthConfig.ldapAuthPrincipalsRegex
+    val uri = ldapAuthConfig.ldapAuthProviderUrl
+    LdapAuth(
+      uri match {
+        case Some(url) if url.startsWith("ldap:") => UnsecuredLdapConnection(url)
+        case Some(url) if url.startsWith("ldaps:") => SecuredLdapConnection(url, ldapAuthConfig.ldapAuthProviderCert)
+        case None => throw new HumioException(s"The LDAP authentication URL is missing or incorrect. LDAP_AUTH_PROVIDER_URL=$uri")
+      },
+      (ldapAuthConfig.ldapAuthPrincipal match {
+        case Some(principals) if principals.nonEmpty && splitPrincipals.isDefined =>
+          principals.split(splitPrincipals.get).toSeq
+        case Some(principal) if principal.nonEmpty =>
+          Seq(principal)
+        case _ => Seq.empty
+      }).map(principal => LdapNamedPrincipal(domain, principal)) ++
+        (kind match {
+          case AuthenticationMethod.LdapSearch =>
+            (ldapAuthConfig.ldapSearchBindName, ldapAuthConfig.ldapSearchBindPassword, ldapAuthConfig.ldapSearchBaseDN) match {
+              case (Some(username), Some(password), Some(dn)) =>
+                ldapAuthConfig.ldapSearchFilter match {
+                  case None =>
+                    Seq(
+                      LdapPrincipalSearch(username, password, dn, "(& (userPrincipalName={0})(objectCategory=user))",
+                        username => getPrincipalName(username, ldapAuthConfig.ldapSearchDomainName.getOrElse(domain))),
+                      LdapPrincipalSearch(username, password, dn, "(& (sAMAccountName={0})(objectCategory=user))",
+                        username => {
+                          val principalName = getPrincipalName(username, ldapAuthConfig.ldapSearchDomainName.getOrElse(domain))
+                          principalName.substring(0, principalName.indexOf('@'))
+                        }))
+                  case Some(filter) =>
+                    Seq(LdapPrincipalSearch(username, password, dn, filter,
+                      username => getPrincipalName(username, ldapAuthConfig.ldapSearchDomainName.getOrElse(domain))))
+                }
+              case _ =>
+                logger.error(s"Missing information required to perform ldap-search. LDAP_SEARCH_BIND_NAME=${ldapAuthConfig.ldapSearchBindName} LDAP_SEARCH_BIND_PASSWORD=${if (ldapAuthConfig.ldapSearchBindPassword.isEmpty) "empty" else "redacted"} LDAP_SEARCH_BASE_DN=${ldapAuthConfig.ldapSearchBaseDN}")
+                Seq.empty
+            }
+          case _ => Seq.empty
+        }))
+  }
+
+  private def ldapEnv(url: String, dn: String, secret: String, env: Map[String, String]): util.Hashtable[String, String] = {
+    if (dn.isEmpty || secret.isEmpty) {
+      throw new javax.naming.AuthenticationException("Missing LDAP credentials, unable to attempt login.")
+    }
+    new util.Hashtable[String, String](
+      (env ++ Map(
+        javax.naming.Context.PROVIDER_URL -> url,
+        javax.naming.Context.SECURITY_PRINCIPAL -> dn,
+        javax.naming.Context.SECURITY_CREDENTIALS -> secret)).asJava)
+  }
+
+  private def openLdapContext(username: String, password: String, url: String, ldapAuth: LdapAuth, ldapGroupBaseDN: Option[String], ldapGroupFilter: Option[String]): (Option[String], Seq[String])= {
+    logger.debug(s"ldap login for user=$username starting...")
+    var ctx: InitialDirContext = null
+
+    try {
+      (ldapAuth.principals.map {
+        case LdapNamedPrincipal(_, principal) =>
+          Some(principal.replace("HUMIOUSERNAME", username))
+        case LdapPrincipalSearch(searchBindName, searchBindNamePassword, dn, filter, transformUsernameToPrincipal) =>
+          val controls = new SearchControls()
+          controls.setSearchScope(SearchControls.SUBTREE_SCOPE)
+          val env = ldapEnv(url, searchBindName, searchBindNamePassword, ldapAuth.conn.env)
+          val args: Array[AnyRef] = Seq(transformUsernameToPrincipal(username)).toArray
+          try {
+            logger.debug(s"initial dir context env=$env")
+            val searchCtx = new InitialDirContext(env)
+            try {
+              logger.debug(s"search: base=$dn filter=$filter args=${args.toList}")
+              val r = searchCtx.search(dn, filter, args, controls)
+              if (r.hasMore) {
+                val searchResult = r.next
+                val dn = searchResult.getNameInNamespace
+                logger.debug(s"searching for user=$username in dn=$dn filter=$filter produced dn=$dn")
+                Some(dn)
+              } else {
+                None
+              }
+            } finally {
+              searchCtx.close()
+            }
+          } catch {
+            case e: NamingException =>
+              // We may try many different combinations when searching so we expect some to fail.
+              logger.debug(s"rejected dn=$dn filter=$filter args=$args reason=${e.getMessage}")
+              None
+          }
+      } collectFirst {
+        case Some(dn) if {
+          try {
+            ctx = new InitialDirContext(ldapEnv(url, dn, password, ldapAuth.conn.env()))
+            true
+          } catch {
+            case e: javax.naming.AuthenticationException =>
+              logger.warn(s"login as user=$username dn=$dn rejected: $e")
+              false
+            case ExceptionUtils.NonFatal(e) =>
+              logger.warn(s"login as user=$username dn=$dn failed: $e")
+              false
+          }
+        } => Some((ctx, dn))
+      } collect {
+        case Some((ctx: InitialDirContext, dn: String)) =>
+          logger.debug(s"login as user=$username dn=$dn succeeded")
+          ldapGroupBaseDN match {
+            case Some(groupBaseDn) =>
+              logger.debug(s"searching for group memberships within ldap for user=$username dn=$dn within groupBaseDn=$groupBaseDn")
+              val groupLookups = Seq(
+                LdapGroupLookup(groupBaseDn, ldapGroupFilter.getOrElse("(& (objectClass=group) (member:1.2.840.113556.1.4.1941:={0}))")),
+              )
+              val sc = new javax.naming.directory.SearchControls()
+              sc.setSearchScope(SearchControls.SUBTREE_SCOPE)
+              val args: Array[AnyRef] = Seq(dn).toArray
+              groupLookups collectFirst {
+                case LdapGroupLookup(groupDn, filter) =>
+                  logger.debug(s"searching for the user=$username (dn=$dn) within the groups in dn=${groupDn} filter=${filter} args=$args")
+                  ctx.search(groupDn, filter, args, sc).asScala.collect {
+                    case group => group.getNameInNamespace
+                  }.toSeq
+              } match {
+                case Some(groups) if groups.nonEmpty =>
+                  logger.debug(s"user=$username dn=$dn is a member of ${groups.length} groups=${groups.mkString("[", ", ", "]")}")
+                  (Some(dn), groups)
+                case _ =>
+                  logger.debug(s"user=$username dn=$dn was not associated with any groups")
+                  (Some(dn), Seq.empty[String])
+              }
+            case None =>
+              (Some(dn), Seq.empty[String])
+          }
+      }).getOrElse((None, Seq.empty[String]))
+    } finally {
+      if (ctx != null) ctx.close()
+    }
+  }
+
+  private def getPrincipalName(username: String, domainName: String): String = {
+    val slash = username.indexOf('\\')
+    if (slash >= 0) {
+      username.substring(slash + 1) + '@' + domainName
+    } else if (username.contains("@")) {
+      username
+    } else {
+      if (domainName.isBlank)
+        username
+      else
+        username + '@' + domainName
+      }
+  }
+
+  //  private def ldapConfigFromEnv(kind: AuthenticationMethod.Value): Option[LdapAuthConfig] = {
+  private def ldapConfigFromEnv(): Option[LdapAuthConfig] = {
+      Some(LdapAuthConfig(
+        ldapDomainName = sys.env.get("LDAP_DOMAIN_NAME"),
+        ldapAuthProviderUrl = sys.env.get("LDAP_AUTH_PROVIDER_URL"),
+        ldapAuthProviderCert = sys.env.get("LDAP_AUTH_PROVIDER_CERT"),
+        ldapAuthPrincipal = sys.env.get("LDAP_AUTH_PRINCIPAL"),
+        ldapAuthPrincipalsRegex = sys.env.get("LDAP_AUTH_PRINCIPALS_REGEX"),
+        ldapSearchBindName = sys.env.get("LDAP_SEARCH_BIND_NAME"),
+        ldapSearchBindPassword = sys.env.get("LDAP_SEARCH_BIND_PASSWORD"),
+        ldapSearchDomainName = sys.env.get("LDAP_SEARCH_DOMAIN_NAME"),
+        ldapSearchBaseDN = sys.env.get("LDAP_SEARCH_BASE_DN"),
+        ldapSearchFilter = sys.env.get("LDAP_SEARCH_FILTER"),
+        ldapGroupBaseDN = sys.env.get("LDAP_GROUP_BASE_DN"),
+        ldapGroupFilter = sys.env.get("LDAP_GROUP_FILTER")))
+    }
+
+}
+
 object Main {
 
-  val logger = createLoggerFor("ldap-test")
+  val logger = Logger.forObject(this)
 
   def main(args: Array[String]): Unit = {
 
@@ -124,7 +313,7 @@ object Main {
     } else {
       logger.info(s"Testing LDAP login for user=${args(0)}")
 
-      if (login(args(0), args(1))) {
+      if (LdapBindLocalLogin.login(args(0), args(1))) {
         logger.info(s"Fantastic, that seems to have worked.")
       } else {
         logger.info(s"Things didn't go as planned, keep trying!")
@@ -132,213 +321,46 @@ object Main {
     }
   }
 
-//  private def ldapConfigFromEnv(kind: AuthenticationMethod.Value): Option[LdapAuthConfig] = {
-  private def ldapConfigFromEnv(): Option[LdapAuthConfig] = {
-    Some(LdapAuthConfig(
-      ldapDomainName = sys.env.get("LDAP_DOMAIN_NAME"),
-      ldapAuthProviderUrl = sys.env.get("LDAP_AUTH_PROVIDER_URL"),
-      ldapAuthProviderCert = sys.env.get("LDAP_AUTH_PROVIDER_CERT"),
-      ldapAuthPrincipal = sys.env.get("LDAP_AUTH_PRINCIPAL"),
-      ldapAuthPrincipalsRegex = sys.env.get("LDAP_AUTH_PRINCIPALS_REGEX"),
-      ldapSearchBindName = sys.env.get("LDAP_SEARCH_BIND_NAME"),
-      ldapSearchBindPassword = sys.env.get("LDAP_SEARCH_BIND_PASSWORD"),
-      ldapSearchDomainName = sys.env.get("LDAP_SEARCH_DOMAIN_NAME"),
-      ldapSearchBaseDN = sys.env.get("LDAP_SEARCH_BASE_DN"),
-      ldapSearchFilter = sys.env.get("LDAP_SEARCH_FILTER"),
-      ldapGroupBaseDN = sys.env.get("LDAP_GROUP_BASE_DN"),
-      ldapGroupFilter = sys.env.get("LDAP_GROUP_FILTER")))
+}
+
+object ExceptionUtils {
+
+  private val logger = Logger.forObject(this)
+
+  /** Defines what fatal means in our system! */
+  def isFatal(t: Throwable) = t match {
+    case _: StackOverflowError => false // We can recover from StackOverflowError even though it is a subclass of VirtualMachineError
+    case _: Error => true
+    case _ => false
   }
 
-  def login(username: String, pass: String): Boolean = {
-    if (username.isBlank) {
-      logger.info(s"missing username in login request")
-      LocalLogin.loginFailure
-    } else if (pass.isBlank) {
-      logger.info(s"missing password in login request")
-      LocalLogin.loginFailure
-    } else {
-      val authenticationMethod = sys.env.get("AUTHENTICATION_METHOD") match {
-        case Some(method) if method.equals("ldap") =>
-          logger.info("AUTHENTICATION_METHOD=Ldap")
-          AuthenticationMethod.Ldap
-        case Some(method) if method.equals("ldap-search") =>
-          logger.info("AUTHENTICATION_METHOD=LdapSearch")
-          AuthenticationMethod.LdapSearch
-        case Some(method) =>
-          logger.error(s"This tool tests LDAP authentication, not ${method}.")
-          AuthenticationMethod.NoAuthentication
-        case None =>
-          logger.error(s"Missing environment variable AUTHENTICATION_METHOD")
-          AuthenticationMethod.NoAuthentication
-      }
-      val ldapConfig = ldapConfigFromEnv()
-      logger.info(s"ldapAuthConfig=${ldapConfig}")
-      ldapConfig match {
-        case None => LocalLogin.loginFailure
-        case Some(ldapAuthConfig) => {
-          if (username.isBlank) {
-            logger.info(s"missing username in login request")
-            LocalLogin.loginFailure
-          } else if (pass.isBlank) {
-            logger.info(s"missing password in login request")
-            LocalLogin.loginFailure
-          } else {
-            val domain = ldapAuthConfig.ldapDomainName.getOrElse("")
-            val principalName = getPrincipalName(username, domain)
-            val ldapAuth = ldapAuthFromConfig(authenticationMethod, domain, ldapAuthConfig)
-            val profile = AuthProviderProfile(provider = "Static", authProviderUsername = principalName, humioUsername = principalName, email = None)
-            openLdapContext(username, pass, ldapAuthConfig.ldapAuthProviderUrl.get, ldapAuth, ldapAuthConfig.ldapGroupBaseDN, ldapAuthConfig.ldapGroupFilter) match {
-              case (Some(_), groups) => true //loginService.login(profile, optionals, groups)
-              case _ => LocalLogin.loginFailure
-            }
-          }
-        }
-      }
-    }
+  def isNonFatal(t: Throwable) = !isFatal(t)
+
+  object Fatal {
+    /**
+     * Extractor for matching all fatal throwables.
+     * Fatal throwables are things that should result in JVM shutdown
+     */
+    def unapply(t: Throwable): Option[Throwable] = if (isFatal(t)) Some(t) else None
   }
 
-  private def ldapAuthFromConfig(kind: AuthenticationMethod.Value, domain: String, ldapAuthConfig: LdapAuthConfig): LdapAuth = {
-    val splitPrincipals = ldapAuthConfig.ldapAuthPrincipalsRegex
-    val uri = ldapAuthConfig.ldapAuthProviderUrl
-    LdapAuth(
-      uri match {
-        case Some(url) if url.startsWith("ldap:") => UnsecuredLdapConnection(url)
-        case Some(url) if url.startsWith("ldaps:") => SecuredLdapConnection(url, ldapAuthConfig.ldapAuthProviderCert)
-        case None => throw new Exception(s"The LDAP authentication URL is missing or incorrect. LDAP_AUTH_PROVIDER_URL=${uri}")
-      },
-      (ldapAuthConfig.ldapAuthPrincipal match {
-        case Some(principals) if principals.nonEmpty && splitPrincipals.isDefined =>
-          principals.split(splitPrincipals.get).toSeq
-        case Some(principal) if principal.nonEmpty =>
-          Seq(principal)
-        case _ => Seq.empty
-      }).map(principal => LdapNamedPrincipal(domain, principal)) ++
-        (kind match {
-          case AuthenticationMethod.LdapSearch =>
-            (ldapAuthConfig.ldapSearchBindName, ldapAuthConfig.ldapSearchBindPassword, ldapAuthConfig.ldapSearchBaseDN) match {
-              case (Some(name), Some(pass), Some(dn)) =>
-                ldapAuthConfig.ldapSearchFilter match {
-                  case None =>
-                    val principalName = getPrincipalName(name, ldapAuthConfig.ldapSearchDomainName.get)
-                    Seq(
-                      LdapPrincipalSearch(principalName, pass, dn, "(& (userPrincipalName={0})(objectCategory=user))"),
-                      LdapPrincipalSearch(principalName.substring(0, principalName.indexOf('@')), pass, dn, "(& (sAMAccountName={0})(objectCategory=user))"))
-                  case Some(filter) =>
-                    Seq(LdapPrincipalSearch(name, pass, dn, filter))
-                }
-              case _ =>
-                logger.error(s"Missing information required to perform ldap-search. LDAP_SEARCH_BIND_NAME=${ldapAuthConfig.ldapSearchBindName} LDAP_SEARCH_BIND_PASSWORD=${if (ldapAuthConfig.ldapSearchBindPassword.isEmpty) "empty" else "redacted"} LDAP_SEARCH_BASE_DN=${ldapAuthConfig.ldapSearchBaseDN}")
-                Seq.empty
-            }
-          case _ => Seq.empty
-        }))
+  object NonFatal {
+    /**
+     * Extractor for matching all throwables that are non-fatal, meaning the JVM is in a sound state.
+     * (In a fatal situation the JVM should be shutdown immediately).
+     */
+    def unapply(t: Throwable): Option[Throwable] = if (isNonFatal(t)) Some(t) else None
+  }
+}
+
+object Logger {
+  def forObject(o: Any): ch.qos.logback.classic.Logger = {
+    buildLogger(o.getClass.getCanonicalName)
   }
 
-  private def ldapEnv(url: String, dn: String, secret: String, env: Map[String, String]): util.Hashtable[String, String] = {
-    if (dn.isEmpty || secret.isEmpty) {
-      throw new javax.naming.AuthenticationException("Missing LDAP credentials, unable to attempt login.")
-    }
-    new util.Hashtable[String, String](
-      (env ++ Map(
-        javax.naming.Context.PROVIDER_URL -> url,
-        javax.naming.Context.SECURITY_PRINCIPAL -> dn,
-        javax.naming.Context.SECURITY_CREDENTIALS -> secret)).asJava)
-  }
-
-  private def openLdapContext(username: String, password: String, url: String, ldapAuth: LdapAuth, ldapGroupBaseDN: Option[String], ldapGroupFilter: Option[String]): (Option[String], Seq[String])= {
-    logger.info(s"ldap login for user=${username} starting...")
-    var ctx: InitialDirContext = null
-
-    (ldapAuth.principals.map(_ match {
-      case LdapNamedPrincipal(_, principal) =>
-        Some(principal.replace("HUMIOUSERNAME", username))
-      case search: LdapPrincipalSearch =>
-        try {
-          val controls = new SearchControls()
-          controls.setSearchScope(SearchControls.SUBTREE_SCOPE)
-          val args: Array[AnyRef] = Seq(search.username).toArray
-          val ctx = new InitialDirContext(ldapEnv(url, search.dn, search.password, ldapAuth.conn.env))
-          try {
-            logger.info(s"search: base=${search.dn} filter=${search.filter} args=${args.toList}")
-            val r = ctx.search(search.dn, search.filter, args, controls)
-            if (r.hasMore) {
-              val searchResult = r.next
-              val dn = searchResult.getNameInNamespace
-              logger.info(s"searching for user=${search.username} in dn=${search.dn} filter=${search.filter} got name=$dn")
-              Some(dn)
-            } else {
-              None
-            }
-          } finally {
-            ctx.close()
-          }
-        } catch {
-          case e: NamingException =>
-            // We may try many different combinations when searching so we expect some to fail.
-            logger.info(s"rejected dn=${search.dn} filter=${search.filter} args=${search.username} reason=${e.getMessage}")
-            None
-        }
-    }) collectFirst {
-      case Some(dn) if {
-        try {
-          ctx = new InitialDirContext(ldapEnv(url, dn, password, ldapAuth.conn.env))
-          true
-        } catch {
-          case e: javax.naming.AuthenticationException =>
-            logger.info(s"login as user=${username} dn=${dn} rejected: ${e}")
-            false
-          case e: Throwable =>
-            logger.warn(s"authentication failed: ${e}")
-            rethrowIfFatal(e)
-            false
-        }
-      } => Some((ctx, dn))
-    } collect {
-      case Some((ctx: InitialDirContext, dn: String)) =>
-        logger.info(s"login as user=${username} dn=${dn} succeeded")
-        if (ldapGroupBaseDN.isDefined) {
-          val groupInfo = LdapGroupLookup(ldapGroupBaseDN.get, ldapGroupFilter.getOrElse("(& (objectClass=group) (member:1.2.840.113556.1.4.1941:={0}))"))
-          val sc = new javax.naming.directory.SearchControls()
-          sc.setSearchScope(SearchControls.SUBTREE_SCOPE)
-          val args: Array[AnyRef] = Seq(dn).toArray
-          logger.info(s"searching for the user=${username} groups within dn=${groupInfo.dn} using filter=${groupInfo.filter} and args=${args}")
-          val groups = ctx.search(groupInfo.dn, groupInfo.filter, args, sc).asScala.collect { case group => group.getNameInNamespace }.toSeq
-          if (groups.nonEmpty)
-            logger.info(s"dn=${dn} is a member of groups=${groups}")
-          (Some(dn), groups)
-        } else {
-          (Some(dn), Seq.empty[String])
-        }
-    }).getOrElse((None, Seq.empty[String]))
-  }
-
-  private def getPrincipalName(username: String, domainName: String): String = {
-    val slash = username.indexOf('\\')
-    val principalName =
-      if (slash >= 0) {
-        username.substring(slash + 1) + '@' + domainName
-      } else if (username.contains("@")) {
-        username
-      } else {
-        if (domainName.isBlank)
-          username
-        else
-          username + '@' + domainName
-      }
-    principalName
-  }
-
-  def rethrowIfFatal(e: Throwable): Unit = {
-    e match {
-      case e: Error => throw e
-      // Other cases that need rethrow to start shutdown in particular?
-      case _ => //fine.
-    }
-  }
-
-  def createLoggerFor(string: String, file: Option[String] = None): ch.qos.logback.classic.Logger = {
+  def buildLogger(string: String, file: Option[String] = None): ch.qos.logback.classic.Logger = {
     val ple = new PatternLayoutEncoder()
-    val lc = LoggerFactory.getILoggerFactory().asInstanceOf[LoggerContext]
+    val lc = LoggerFactory.getILoggerFactory.asInstanceOf[LoggerContext]
     ple.setPattern("%date %level [%thread] %logger{10} [%file:%line]\t%msg%n")
     ple.setContext(lc)
     ple.start()
@@ -358,10 +380,45 @@ object Main {
     // org.slf4j.Logger.ROOT_LOGGER_NAME
     val logger = LoggerFactory.getLogger(string).asInstanceOf[ch.qos.logback.classic.Logger]
     logger.addAppender(appender)
-    logger.setLevel(Level.DEBUG)
+    logger.setLevel(Level.ALL)
     logger.setAdditive(false)
 
     logger
   }
-
 }
+
+class HumioException(msg: String) extends Exception
+
+object LocalLogin {
+  val loginFailure = false
+}
+
+case class AuthProviderProfile(
+  provider: String,
+  authProviderUsername: String,
+  humioUsername: String,
+  email: Option[Option[String]] = None,
+  company: Option[Option[String]] = None,
+  location: Option[Option[String]] = None,
+  name: Option[Option[String]] = None,
+  isRoot: Option[Option[Boolean]] = None,
+  picture: Option[Option[String]] = None)
+
+object AuthenticationMethod extends Enumeration {
+  val NoAuthentication, SingleUser, Auth0, Ldap, LdapSearch, Static, SetByProxy, FederatedIdentity, OAuth, SAML = Value
+}
+
+case class LdapAuthConfig(
+  ldapAuthProviderUrl: Option[String],
+  ldapAuthProviderCert: Option[String],
+  ldapDomainName: Option[String],
+  ldapAuthPrincipal: Option[String],
+  ldapAuthPrincipalsRegex: Option[String],
+  ldapSearchBindName: Option[String],
+  ldapSearchBindPassword: Option[String],
+  ldapSearchBaseDN: Option[String],
+  ldapSearchDomainName: Option[String],
+  ldapSearchFilter: Option[String],
+  ldapGroupBaseDN: Option[String],
+  ldapGroupFilter: Option[String])
+
