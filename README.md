@@ -6,7 +6,7 @@ try to authenticate and fetch group membership from the LDAP (or ActiveDirectory
 # Testing
 
 * Starting the test container with OpenLDAP and test data
-```shell
+```shell script
 docker pull rroemhild/test-openldap
 docker run --name ldap-test --privileged -d -p 389:389 rroemhild/test-openldap
 ```
@@ -53,7 +53,7 @@ export LDAP_GROUP_BASE_DN="ou=people,dc=planetexpress,dc=com"
 ```
 
 Let's try via ldapsearch before using the ldap_test JAR:
-```shell
+```shell script
 $ docker exec -it ldap-test ldapsearch -h 127.0.0.1 -p 389 -b "dc=planetexpress,dc=com" -w fry -D "uid=fry,ou=people,dc=planetexpress,dc=com" -s sub -b "ou=people,dc=planetexpress,dc=com" "uid=fry" "DN"
 ldap_bind: Invalid credentials (49)
 ```
@@ -76,7 +76,7 @@ export LDAP_GROUP_FILTER="(& (objectClass=Group) (member={0}))"
 ```
 
 Let's try via ldapsearch before using the ldap_test JAR:
-```shell
+```shell script
 docker exec -it ldap-test ldapsearch -h 127.0.0.1 -p 389 -b "dc=planetexpress,dc=com" -w GoodNewsEveryone -D "cn=admin,dc=planetexpress,dc=com" -s sub -b "ou=people,dc=planetexpress,dc=com" "(mail=fry@planetexpress.com)" "DN"
 # extended LDIF
 #
@@ -137,7 +137,7 @@ of `ou=people,dc=planetexpress,dc=com` and a filter `(& (objectClass=group) (mem
 is just a place holder for the argument which in our case is the user's DN, or
 `cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com`.  We can test using `ldapsearch` first.
 
-```shell
+```shell script
 docker exec -it ldap-test ldapsearch -h 127.0.0.1 -p 389 -b "dc=planetexpress,dc=com" -w GoodNewsEveryone -D "cn=admin,dc=planetexpress,dc=com" -s sub -b "ou=people,dc=planetexpress,dc=com" "(& (objectClass=Group) (member=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com))"
 # extended LDIF
 #
@@ -167,16 +167,21 @@ result: 0 Success
 ```
 
 # Building
-Java version 11 or 12 and `sbt` (the Scala Build Tool, are required to build.
+Java version 11 or 12 and `sbt` (the Scala Build Tool), are required to build.  Use `sbt assembly` to build a JAR
+that includes all dependencies of the project.
 
-```shell
+```shell script
 $ sbt
+  [info] Loading settings for project global-plugins from metals.sbt ...
+  [info] Loading global plugins from /home/user/.sbt/1.0/plugins
+  [info] Loading settings for project ldap_test-build from plugins.sbt ...
+  [info] Loading project definition from /your/cwd/ldap_test/project
   [info] Loading settings for project root from build.sbt ...
   [info] Set current project to ldap-test (in build file:/your/cwd/ldap_test/)
   [info] sbt server started at local:///home/user/.sbt/1.0/server/c7d0fddc36b52e9eb8dd/sock
   sbt:ldap-test> clean
-  [success] Total time: 0 s, completed Aug 27, 2019, 1:44:28 PM
-  sbt:ldap-test> package
+  [success] Total time: 0 s, completed Aug 28, 2019, 10:29:19 AM
+  sbt:ldap-test> assembly
   [info] Updating ...
   [info] Formatting 1 Scala source ProjectRef(uri("file:/your/cwd/ldap_test/"), "root")(compile) ...
   [warn] Scalariform parser error for /your/cwd/ldap_test/src/main/scala/com/humio/ldap_test/Main.scala: illegal start of simple expression: Token(RPAREN,),692,))
@@ -189,18 +194,42 @@ $ sbt
   WARNING: All illegal access operations will be denied in a future release
   [warn] bootstrap class path not set in conjunction with -source 9
   [info] Done compiling.
-  [info] Packaging /your/cwd/ldap_test/target/scala-2.12/ldap-test_2.12-0.4.0-SNAPSHOT.jar ...
+  [info] Including: slf4j-api-1.7.25.jar
+  [info] Including: logback-core-1.2.3.jar
+  [info] Including: scala-logging_2.12-3.9.2.jar
+  [info] Including: util-backports_2.12-2.0.jar
+  [info] Including: logback-classic-1.2.3.jar
+  [info] Including: scala-reflect-2.12.9.jar
+  [info] Including: scala-library-2.12.9.jar
+  [info] Checking every *.class/*.jar file's SHA-1.
+  [info] Merging files...
+  [warn] Merging 'NOTICE' with strategy 'rename'
+  [warn] Merging 'LICENSE' with strategy 'rename'
+  [warn] Merging 'META-INF/MANIFEST.MF' with strategy 'discard'
+  [warn] Merging 'META-INF/maven/ch.qos.logback/logback-classic/pom.properties' with strategy 'discard'
+  [warn] Merging 'META-INF/maven/ch.qos.logback/logback-classic/pom.xml' with strategy 'discard'
+  [warn] Merging 'META-INF/maven/ch.qos.logback/logback-core/pom.properties' with strategy 'discard'
+  [warn] Merging 'META-INF/maven/ch.qos.logback/logback-core/pom.xml' with strategy 'discard'
+  [warn] Merging 'META-INF/maven/org.slf4j/slf4j-api/pom.properties' with strategy 'discard'
+  [warn] Merging 'META-INF/maven/org.slf4j/slf4j-api/pom.xml' with strategy 'discard'
+  [warn] Strategy 'discard' was applied to 7 files
+  [warn] Strategy 'rename' was applied to 2 files
+  [info] SHA-1: 89b2707924e1ddf4cb0050eeeda7eebd8b8813de
+  [info] Packaging /your/cwd/ldap_test/target/scala-2.12/ldap-test-assembly-0.4.0-SNAPSHOT.jar ...
   [info] Done packaging.
-  [success] Total time: 5 s, completed Aug 27, 2019, 1:44:36 PM
-  sbt:ldap-test> 
+  [success] Total time: 7 s, completed Aug 28, 2019, 10:29:30 AM
 ```
-Should compile and produce the uber Java archive (JAR) `target/scala-2.12/ldap-test_2.12-0.4.0-SNAPSHOT.jar`.
+Should compile and produce the uber Java archive (JAR) `target/scala-2.12/ldap-test-assembly-0.4.0-SNAPSHOT.jar`.  The steps
+are:
+ * `sbt clean`
+ * `sbt assembly`
 
 # Putting it all together and using the test JAR to validate
 
-We're going to test as if someone typed user `fry` with password `fry` into Humio using the test JAR.
+We're going to test as if someone typed user `fry` with password `fry` into Humio using the test JAR using first `sbt`
+to run it the program.
 
-```shell
+```shell script
 $ env AUTHENTICATION_METHOD=ldap-search LDAP_DOMAIN_NAME=planetexpress.com LDAP_AUTH_PROVIDER_URL="ldap://127.0.0.1:389" LDAP_SEARCH_BIND_NAME="cn=admin,dc=planetexpress,dc=com" LDAP_SEARCH_BIND_PASSWORD="GoodNewsEveryone" LDAP_SEARCH_FILTER="(& (mail={0}) (objectClass=person))" LDAP_SEARCH_BASE_DN="ou=people,dc=planetexpress,dc=com" LDAP_GROUP_BASE_DN="ou=people,dc=planetexpress,dc=com" LDAP_GROUP_FILTER="(& (objectClass=Group) (member={0}))" sbt '; set javaOptions ++= Seq("-Dlog4j.configuration=file:/resources/log4j_dev.properties", "-Dlog4j.appender.console.immediateFlush=true") ;runMain com.humio.ldap_test.Main fry@planetexpress.com fry'
   [info] Loading settings for project global-plugins from metals.sbt ...
   [info] Loading global plugins from /home/user/.sbt/1.0/plugins
@@ -243,8 +272,28 @@ $ env AUTHENTICATION_METHOD=ldap-search LDAP_DOMAIN_NAME=planetexpress.com LDAP_
   [success] Total time: 6 s, completed Aug 27, 2019, 2:28:18 PM
 ```
 
-Cool.  We authenticated with the OpenLDAP instance using `admin`'s credentials and searched for `fry`'s DN then used
-that to find out that he's a member of the `ship_crew` group.  Our work is done, but it could have been easier...
+Cool.  Next using `java -jar ...`
+
+```shell script
+env AUTHENTICATION_METHOD=ldap-search LDAP_DOMAIN_NAME=planetexpress.com LDAP_AUTH_PROVIDER_URL="ldap://127.0.0.1:389" LDAP_SEARCH_BIND_NAME="cn=admin,dc=planetexpress,dc=com" LDAP_SEARCH_BIND_PASSWORD="GoodNewsEveryone" LDAP_SEARCH_FILTER="(& (mail={0}) (objectClass=person))" LDAP_SEARCH_BASE_DN="ou=people,dc=planetexpress,dc=com" LDAP_GROUP_BASE_DN="ou=people,dc=planetexpress,dc=com" LDAP_GROUP_FILTER="(& (objectClass=Group) (member={0}))" java -jar ldap-test.jar fry@planetexpress.com fry
+2019-08-28 10:32:14,235 INFO [main] c.h.l.Main$ [Main.scala:314]	Testing LDAP login for user=fry@planetexpress.com
+2019-08-28 10:32:14,444 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:68]	AUTHENTICATION_METHOD=LdapSearch
+2019-08-28 10:32:14,521 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:78]	ldapAuthConfig=Some(LdapAuthConfig(Some(ldap://127.0.0.1:389),None,Some(planetexpress.com),None,None,Some(cn=admin,dc=planetexpress,dc=com),Some(GoodNewsEveryone),Some(ou=people,dc=planetexpress,dc=com),None,Some((& (mail={0}) (objectClass=person))),Some(ou=people,dc=planetexpress,dc=com),Some((& (objectClass=Group) (member={0})))))
+2019-08-28 10:32:14,538 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:158]	ldap login for user=fry@planetexpress.com starting...
+2019-08-28 10:32:14,550 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:171]	initial dir context env={java.naming.factory.initial=com.sun.jndi.ldap.LdapCtxFactory, java.naming.provider.url=ldap://127.0.0.1:389, java.naming.security.principal=cn=admin,dc=planetexpress,dc=com, java.naming.security.authentication=simple, java.naming.security.credentials=GoodNewsEveryone}
+2019-08-28 10:32:14,610 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:174]	search: base=ou=people,dc=planetexpress,dc=com filter=(& (mail={0}) (objectClass=person)) args=List(fry@planetexpress.com)
+2019-08-28 10:32:14,626 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:179]	searching for user=fry@planetexpress.com in dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com filter=(& (mail={0}) (objectClass=person)) produced dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com
+2019-08-28 10:32:14,631 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:209]	login as user=fry@planetexpress.com dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com succeeded
+2019-08-28 10:32:14,631 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:212]	searching for group memberships within ldap for user=fry@planetexpress.com dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com within groupBaseDn=ou=people,dc=planetexpress,dc=com
+2019-08-28 10:32:14,632 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:221]	searching for the user=fry@planetexpress.com (dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com) within the groups in dn=ou=people,dc=planetexpress,dc=com filter=(& (objectClass=Group) (member={0})) args=[Ljava.lang.Object;@2aa5fe93
+2019-08-28 10:32:14,648 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:227]	user=fry@planetexpress.com dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com is a member of 1 groups=[cn=ship_crew,ou=people,dc=planetexpress,dc=com]
+2019-08-28 10:32:14,651 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:95]	profile for loginService=AuthProviderProfile(Static,fry@planetexpress.com,fry@planetexpress.com,None,None,None,None,None,None)
+2019-08-28 10:32:14,651 INFO [main] c.h.l.Main$ [Main.scala:317]	Fantastic, that seems to have worked.
+```
+
+Fantastic, that seems to have worked.  We authenticated with the OpenLDAP instance using `admin`'s credentials and
+searched for `fry`'s DN then used that to find out that he's a member of the `ship_crew` group.  Our work is done,
+but it could have been easier...
 
 # Docker test image of this repo
 
@@ -268,7 +317,10 @@ $ cat > .env <<EOF
   LDAP_SEARCH_BASE_DN="ou=people,dc=planetexpress,dc=com"
   LDAP_GROUP_BASE_DN="ou=people,dc=planetexpress,dc=com"
   LDAP_GROUP_FILTER="(& (objectClass=Group) (member={0}))"
-  EOF
-$ docker pull humio/humio-ldap-test
+EOF
+$ docker pull humio/humio-ldap-test:latest
+latest: Pulling from humio/humio-ldap-test
+Digest: sha256:85c864953293db9fe6022b77aa680482250195d97f22c6d3f234010f9f69d2a8
+Status: Image is up to date for humio/humio-ldap-test:latest
 $ docker run -it --rm --env-file .env humio-ldap-test fry fry
 ```
