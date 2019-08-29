@@ -24,7 +24,7 @@ case class UnsecuredLdapConnection(url: String) extends LdapConnectionMethod(url
   require(url.startsWith("ldap:"), "The LDAP endpoint must begin with 'ldap:' not " + url.take(5))
 }
 case class SecuredLdapConnection(url: String, cert: Option[String] = None) extends LdapConnectionMethod(url) {
-  require(url.startsWith("ldaps:"), "The LDAP over SSL/TLS endpoint must begin with 'ldaps:' not " + url.take(6))
+  require(url startsWith "ldaps:", "The LDAP over SSL/TLS endpoint must begin with 'ldaps:' not " + url.take(6))
 
   override def env(): Map[String, String] = {
     super.env ++
@@ -40,11 +40,11 @@ case class SecuredLdapConnection(url: String, cert: Option[String] = None) exten
   }
 }
 
-sealed abstract class LdapPrincipalLookup
-case class LdapNamedPrincipal(domain: String, principal: String) extends LdapPrincipalLookup
-case class LdapPrincipalSearch(username: String, password: String, dn: String, filter: String, transformUsernameToPrincipal: (String) => String) extends LdapPrincipalLookup
+sealed abstract class LdapPrincipal
+case class LdapKnownPrincipal(principal: String) extends LdapPrincipal
+case class LdapPrincipalSearch(username: String, password: String, dn: String, filter: String, transformUsernameToPrincipal: String => String) extends LdapPrincipal
 
-case class LdapAuth(conn: LdapConnectionMethod, principals: Seq[LdapPrincipalLookup])
+case class LdapAuth(conn: LdapConnectionMethod, principals: Seq[LdapPrincipal])
 
 case class LdapGroupLookup(dn: String, filter: String)
 
@@ -89,7 +89,7 @@ object LdapBindLocalLogin {
             val domain = ldapAuthConfig.ldapDomainName.getOrElse("")
             val principalName = getPrincipalName(username, domain)
             val ldapAuth = ldapAuthFromConfig(authenticationMethod, domain, ldapAuthConfig)
-            openLdapContext(username, pass, ldapAuthConfig.ldapAuthProviderUrl.get, ldapAuth, ldapAuthConfig.ldapGroupBaseDN, ldapAuthConfig.ldapGroupFilter) match {
+            openLdapContext(username, pass, ldapAuthConfig.ldapAuthProviderUrl.get, ldapAuth, ldapAuthConfig.ldapGroupBaseDn, ldapAuthConfig.ldapGroupFilter) match {
               case (Some(_), groups) =>
                 val profile = AuthProviderProfile(provider = "Static", authProviderUsername = principalName, humioUsername = principalName, email = None)
                 logger.info(s"profile for loginService=$profile")
@@ -103,44 +103,44 @@ object LdapBindLocalLogin {
 
   private def ldapAuthFromConfig(kind: AuthenticationMethod.Value, domain: String, ldapAuthConfig: LdapAuthConfig): LdapAuth = {
     val splitPrincipals = ldapAuthConfig.ldapAuthPrincipalsRegex
-    val uri = ldapAuthConfig.ldapAuthProviderUrl
-    LdapAuth(
-      uri match {
-        case Some(url) if url.startsWith("ldap:") => UnsecuredLdapConnection(url)
-        case Some(url) if url.startsWith("ldaps:") => SecuredLdapConnection(url, ldapAuthConfig.ldapAuthProviderCert)
-        case None => throw new HumioException(s"The LDAP authentication URL is missing or incorrect. LDAP_AUTH_PROVIDER_URL=$uri")
-      },
-      (ldapAuthConfig.ldapAuthPrincipal match {
-        case Some(principals) if principals.nonEmpty && splitPrincipals.isDefined =>
-          principals.split(splitPrincipals.get).toSeq
-        case Some(principal) if principal.nonEmpty =>
-          Seq(principal)
-        case _ => Seq.empty
-      }).map(principal => LdapNamedPrincipal(domain, principal)) ++
-        (kind match {
-          case AuthenticationMethod.LdapSearch =>
-            (ldapAuthConfig.ldapSearchBindName, ldapAuthConfig.ldapSearchBindPassword, ldapAuthConfig.ldapSearchBaseDN) match {
-              case (Some(username), Some(password), Some(dn)) =>
-                ldapAuthConfig.ldapSearchFilter match {
-                  case None =>
-                    Seq(
-                      LdapPrincipalSearch(username, password, dn, "(& (userPrincipalName={0})(objectCategory=user))",
-                        username => getPrincipalName(username, ldapAuthConfig.ldapSearchDomainName.getOrElse(domain))),
-                      LdapPrincipalSearch(username, password, dn, "(& (sAMAccountName={0})(objectCategory=user))",
-                        username => {
-                          val principalName = getPrincipalName(username, ldapAuthConfig.ldapSearchDomainName.getOrElse(domain))
-                          principalName.substring(0, principalName.indexOf('@'))
-                        }))
-                  case Some(filter) =>
-                    Seq(LdapPrincipalSearch(username, password, dn, filter,
-                      username => getPrincipalName(username, ldapAuthConfig.ldapSearchDomainName.getOrElse(domain))))
-                }
-              case _ =>
-                logger.error(s"Missing information required to perform ldap-search. LDAP_SEARCH_BIND_NAME=${ldapAuthConfig.ldapSearchBindName} LDAP_SEARCH_BIND_PASSWORD=${if (ldapAuthConfig.ldapSearchBindPassword.isEmpty) "empty" else "redacted"} LDAP_SEARCH_BASE_DN=${ldapAuthConfig.ldapSearchBaseDN}")
-                Seq.empty
-            }
-          case _ => Seq.empty
-        }))
+    val connectionMethod = ldapAuthConfig.ldapAuthProviderUrl match {
+      case Some(url) if url.startsWith("ldap:") => UnsecuredLdapConnection(url)
+      case Some(url) if url.startsWith("ldaps:") => SecuredLdapConnection(url, ldapAuthConfig.ldapAuthProviderCert)
+      case None => throw new HumioException(s"The LDAP authentication URL is missing or incorrect. LDAP_AUTH_PROVIDER_URL=${ldapAuthConfig.ldapAuthProviderUrl}")
+    }
+    val principals = kind match {
+        case AuthenticationMethod.Ldap =>
+          (ldapAuthConfig.ldapAuthPrincipal match {
+            case Some(principals) if principals.nonEmpty && splitPrincipals.isDefined =>
+              principals.split(splitPrincipals.get).toSeq
+            case Some(principal) if principal.nonEmpty =>
+              Seq(principal)
+            case _ =>
+              Seq(getPrincipalName("HUMIOUSERNAME", domain))
+          }).map(principal => LdapKnownPrincipal(principal))
+        case AuthenticationMethod.LdapSearch =>
+          (ldapAuthConfig.ldapSearchBindName, ldapAuthConfig.ldapSearchBindPassword, ldapAuthConfig.ldapSearchBaseDn) match {
+            case (Some(searchBindName), Some(searchBindPassword), Some(searchBaseDn)) =>
+              ldapAuthConfig.ldapSearchFilter match {
+                case None =>
+                  Seq(
+                    LdapPrincipalSearch(searchBindName, searchBindPassword, searchBaseDn, "(& (userPrincipalName={0})(objectCategory=user))",
+                      username => getPrincipalName(username, ldapAuthConfig.ldapSearchDomainName.getOrElse(domain))),
+                    LdapPrincipalSearch(searchBindName, searchBindPassword, searchBaseDn, "(& (sAMAccountName={0})(objectCategory=user))",
+                      username => {
+                        val principalName = getPrincipalName(username, ldapAuthConfig.ldapSearchDomainName.getOrElse(domain))
+                        principalName.substring(0, principalName.indexOf('@'))
+                      }))
+                case Some(filter) =>
+                  Seq(LdapPrincipalSearch(searchBindName, searchBindPassword, searchBaseDn, filter,
+                    username => getPrincipalName(username, ldapAuthConfig.ldapSearchDomainName.getOrElse(domain))))
+              }
+            case _ =>
+              logger.error(s"Missing information required to perform ldap-search. LDAP_SEARCH_BIND_NAME=${ldapAuthConfig.ldapSearchBindName} LDAP_SEARCH_BIND_PASSWORD=${if (ldapAuthConfig.ldapSearchBindPassword.isEmpty) "empty" else "REDACTED"} LDAP_SEARCH_BASE_DN=${ldapAuthConfig.ldapSearchBaseDn}")
+              Seq.empty
+          }
+      }
+    LdapAuth(connectionMethod, principals)
   }
 
   private def ldapEnv(url: String, dn: String, secret: String, env: Map[String, String]): util.Hashtable[String, String] = {
@@ -160,18 +160,18 @@ object LdapBindLocalLogin {
 
     try {
       (ldapAuth.principals.map {
-        case LdapNamedPrincipal(_, principal) =>
+        case LdapKnownPrincipal(principal) =>
           Some(principal.replace("HUMIOUSERNAME", username))
         case LdapPrincipalSearch(searchBindName, searchBindNamePassword, dn, filter, transformUsernameToPrincipal) =>
           val controls = new SearchControls()
           controls.setSearchScope(SearchControls.SUBTREE_SCOPE)
-          val env = ldapEnv(url, searchBindName, searchBindNamePassword, ldapAuth.conn.env)
+          val env = ldapEnv(url, searchBindName, searchBindNamePassword, ldapAuth.conn.env())
           val args: Array[AnyRef] = Seq(transformUsernameToPrincipal(username)).toArray
           try {
             logger.debug(s"initial dir context env=$env")
             val searchCtx = new InitialDirContext(env)
             try {
-              logger.debug(s"search: base=$dn filter=$filter args=${args.toList}")
+              logger.debug(s"search: base=$dn filter=$filter args=${args.mkString("[", ", ", "]")}")
               val r = searchCtx.search(dn, filter, args, controls)
               if (r.hasMore) {
                 val searchResult = r.next
@@ -187,7 +187,7 @@ object LdapBindLocalLogin {
           } catch {
             case e: NamingException =>
               // We may try many different combinations when searching so we expect some to fail.
-              logger.debug(s"rejected dn=$dn filter=$filter args=$args reason=${e.getMessage}")
+              logger.debug(s"rejected dn=$dn filter=$filter args=${args.mkString("[", ", ", "]")} reason=${e.getMessage}")
               None
           }
       } collectFirst {
@@ -218,7 +218,7 @@ object LdapBindLocalLogin {
               val args: Array[AnyRef] = Seq(dn).toArray
               groupLookups collectFirst {
                 case LdapGroupLookup(groupDn, filter) =>
-                  logger.debug(s"searching for the user=$username (dn=$dn) within the groups in dn=${groupDn} filter=${filter} args=$args")
+                  logger.debug(s"searching for the user=$username (dn=$dn) within the groups in dn=$groupDn filter=$filter args=${args.mkString("[", ", ", "]")}")
                   ctx.search(groupDn, filter, args, sc).asScala.collect {
                     case group => group.getNameInNamespace
                   }.toSeq
@@ -226,7 +226,7 @@ object LdapBindLocalLogin {
                 case Some(groups) if groups.nonEmpty =>
                   logger.debug(s"user=$username dn=$dn is a member of ${groups.length} groups=${groups.mkString("[", ", ", "]")}")
                   (Some(dn), groups)
-                case _ =>
+                case None =>
                   logger.debug(s"user=$username dn=$dn was not associated with any groups")
                   (Some(dn), Seq.empty[String])
               }
@@ -264,9 +264,9 @@ object LdapBindLocalLogin {
         ldapSearchBindName = sys.env.get("LDAP_SEARCH_BIND_NAME"),
         ldapSearchBindPassword = sys.env.get("LDAP_SEARCH_BIND_PASSWORD"),
         ldapSearchDomainName = sys.env.get("LDAP_SEARCH_DOMAIN_NAME"),
-        ldapSearchBaseDN = sys.env.get("LDAP_SEARCH_BASE_DN"),
+        ldapSearchBaseDn = sys.env.get("LDAP_SEARCH_BASE_DN"),
         ldapSearchFilter = sys.env.get("LDAP_SEARCH_FILTER"),
-        ldapGroupBaseDN = sys.env.get("LDAP_GROUP_BASE_DN"),
+        ldapGroupBaseDn = sys.env.get("LDAP_GROUP_BASE_DN"),
         ldapGroupFilter = sys.env.get("LDAP_GROUP_FILTER")))
     }
 
@@ -408,17 +408,17 @@ object AuthenticationMethod extends Enumeration {
   val NoAuthentication, SingleUser, Auth0, Ldap, LdapSearch, Static, SetByProxy, FederatedIdentity, OAuth, SAML = Value
 }
 
-case class LdapAuthConfig(
-  ldapAuthProviderUrl: Option[String],
+case class LdapAuthConfig
+( ldapAuthProviderUrl: Option[String],
   ldapAuthProviderCert: Option[String],
   ldapDomainName: Option[String],
   ldapAuthPrincipal: Option[String],
   ldapAuthPrincipalsRegex: Option[String],
   ldapSearchBindName: Option[String],
   ldapSearchBindPassword: Option[String],
-  ldapSearchBaseDN: Option[String],
+  ldapSearchBaseDn: Option[String],
   ldapSearchDomainName: Option[String],
   ldapSearchFilter: Option[String],
-  ldapGroupBaseDN: Option[String],
+  ldapGroupBaseDn: Option[String],
   ldapGroupFilter: Option[String])
 
