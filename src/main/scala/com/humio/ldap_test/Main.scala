@@ -226,7 +226,7 @@ object LdapBindLocalLogin {
                 case Some(groups) if groups.nonEmpty =>
                   logger.debug(s"user=$username dn=$dn is a member of ${groups.length} groups=${groups.mkString("[", ", ", "]")}")
                   (Some(dn), groups)
-                case None =>
+                case _ =>
                   logger.debug(s"user=$username dn=$dn was not associated with any groups")
                   (Some(dn), Seq.empty[String])
               }
