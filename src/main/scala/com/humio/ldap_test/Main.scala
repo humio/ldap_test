@@ -7,7 +7,8 @@ import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.classic.{ Level, LoggerContext }
 import ch.qos.logback.core.ConsoleAppender
 import javax.naming.NamingException
-import javax.naming.directory.{ InitialDirContext, SearchControls }
+import javax.naming.{ NamingEnumeration, NamingException }
+import javax.naming.directory.{ InitialDirContext, SearchControls, SearchResult }
 import org.slf4j.LoggerFactory
 
 import scala.collection.JavaConverters._
@@ -154,7 +155,7 @@ object LdapBindLocalLogin {
         javax.naming.Context.SECURITY_CREDENTIALS -> secret)).asJava)
   }
 
-  private def openLdapContext(username: String, password: String, url: String, ldapAuth: LdapAuth, ldapGroupBaseDN: Option[String], ldapGroupFilter: Option[String]): (Option[String], Seq[String])= {
+  private def openLdapContext(username: String, password: String, url: String, ldapAuth: LdapAuth, ldapGroupBaseDn: Option[String], ldapGroupFilter: Option[String]): (Option[String], Seq[String])= {
     logger.debug(s"ldap login for user=$username starting...")
     var ctx: InitialDirContext = null
 
@@ -163,16 +164,17 @@ object LdapBindLocalLogin {
         case LdapKnownPrincipal(principal) =>
           Some(principal.replace("HUMIOUSERNAME", username))
         case LdapPrincipalSearch(searchBindName, searchBindNamePassword, dn, filter, transformUsernameToPrincipal) =>
-          val controls = new SearchControls()
-          controls.setSearchScope(SearchControls.SUBTREE_SCOPE)
           val env = ldapEnv(url, searchBindName, searchBindNamePassword, ldapAuth.conn.env())
+          val searchControls = new SearchControls()
+          searchControls.setReturningAttributes(Array("dn"))
+          searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE)
           val args: Array[AnyRef] = Seq(transformUsernameToPrincipal(username)).toArray
           try {
             logger.debug(s"initial dir context env=$env")
             val searchCtx = new InitialDirContext(env)
             try {
               logger.debug(s"search: base=$dn filter=$filter args=${args.mkString("[", ", ", "]")}")
-              val r = searchCtx.search(dn, filter, args, controls)
+              val r = searchCtx.search(dn, filter, args, searchControls)
               if (r.hasMore) {
                 val searchResult = r.next
                 val dn = searchResult.getNameInNamespace
@@ -207,19 +209,29 @@ object LdapBindLocalLogin {
       } collect {
         case Some((ctx: InitialDirContext, dn: String)) =>
           logger.debug(s"login as user=$username dn=$dn succeeded")
-          ldapGroupBaseDN match {
+          ldapGroupBaseDn match {
             case Some(groupBaseDn) =>
               logger.debug(s"searching for group memberships within ldap for user=$username dn=$dn within groupBaseDn=$groupBaseDn")
               val groupLookups = Seq(
                 LdapGroupLookup(groupBaseDn, ldapGroupFilter.getOrElse("(& (objectClass=group) (member:1.2.840.113556.1.4.1941:={0}))")),
               )
-              val sc = new javax.naming.directory.SearchControls()
-              sc.setSearchScope(SearchControls.SUBTREE_SCOPE)
+              val searchControls = new javax.naming.directory.SearchControls()
+              searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE)
               val args: Array[AnyRef] = Seq(dn).toArray
               groupLookups collectFirst {
                 case LdapGroupLookup(groupDn, filter) =>
-                  logger.debug(s"searching for the user=$username (dn=$dn) within the groups in dn=$groupDn filter=$filter args=${args.mkString("[", ", ", "]")}")
-                  ctx.search(groupDn, filter, args, sc).asScala.collect {
+                  logger.debug(s"searching for the user=$username (dn=$dn) within the groups in groupDn=$groupDn filter=$filter args=${args.mkString("[", ", ", "]")}")
+                  val result = try {
+                    ctx.search(groupDn, filter, args, searchControls)
+                  } catch {
+                    case e: javax.naming.directory.InvalidSearchFilterException if !ctx.getEnvironment.containsKey("java.naming.ldap.version") =>
+                        logger.warn(s"group search failed ${e.getMessage}, try setting LDAP_PROTOCOL_VERSION=3 in your config if you are using ActiveDirectory", e)
+                        Seq.empty[SearchResult].asInstanceOf[NamingEnumeration[SearchResult]]
+                    case ExceptionUtils.NonFatal(e) =>
+                      logger.warn(s"group search groupDn=$groupDn filter=$filter args=${args.mkString("[", ", ", "]")} failed, ${e.getMessage}", e)
+                      Seq.empty[SearchResult].asInstanceOf[NamingEnumeration[SearchResult]]
+                  }
+                  result.asScala.collect {
                     case group => group.getNameInNamespace
                   }.toSeq
               } match {
