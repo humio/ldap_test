@@ -210,7 +210,7 @@ object LdapBindLocalLogin {
       } collect {
         case Some((ctx: InitialDirContext, dn: String)) =>
           logger.debug(s"login as user=$username dn=$dn succeeded")
-          if (config.autoUpdateGroupMembershipsOnSuccessfullLogin) {
+          if (true) { //config.autoUpdateGroupMembershipsOnSuccessfullLogin) {
             val groupBaseDn = ldapGroupBaseDn.getOrElse(dn)
             logger.debug(s"searching for group memberships within ldap for user=$username dn=$dn within groupBaseDn=$groupBaseDn")
             val groupLookups = Seq(
