@@ -320,7 +320,7 @@ $ cat > .env <<EOF
 EOF
 $ docker pull humio/humio-ldap-test:latest
 latest: Pulling from humio/humio-ldap-test
-Digest: sha256:64a6652b91930d2a2fb9f111db94fb5efcbd2ee2486548b3bd45f1504e9b4a4a
+Digest: sha256:95735316f6de5bd8939912259f72639c4ad9acd44aeba266cab84e84a321d7b1
 Status: Image is up to date for humio/humio-ldap-test:latest
 $ docker run -it --rm --env-file .env humio-ldap-test fry fry
 ```

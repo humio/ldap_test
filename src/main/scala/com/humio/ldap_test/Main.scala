@@ -7,8 +7,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.classic.{ Level, LoggerContext }
 import ch.qos.logback.core.ConsoleAppender
 import javax.naming.NamingException
-import javax.naming.{ NamingEnumeration, NamingException }
-import javax.naming.directory.{ InitialDirContext, SearchControls, SearchResult }
+import javax.naming.directory.{ InitialDirContext, SearchControls }
 import org.slf4j.LoggerFactory
 
 import scala.collection.JavaConverters._
@@ -213,28 +212,25 @@ object LdapBindLocalLogin {
           if (true) { //config.autoUpdateGroupMembershipsOnSuccessfullLogin) {
             val groupBaseDn = ldapGroupBaseDn.getOrElse(dn)
             logger.debug(s"searching for group memberships within ldap for user=$username dn=$dn within groupBaseDn=$groupBaseDn")
-            val groupLookups = Seq(
-              LdapGroupLookup(groupBaseDn, ldapGroupFilter.getOrElse("(& (objectClass=group) (member:1.2.840.113556.1.4.1941:={0}))")),
-            )
+            val filter = ldapGroupFilter.getOrElse("(& (objectClass=group) (member:1.2.840.113556.1.4.1941:={0}))")
+            val groupLookups = Seq(LdapGroupLookup(groupBaseDn, filter))
             val searchControls = new javax.naming.directory.SearchControls()
             searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE)
             val args: Array[AnyRef] = Seq(dn).toArray
             groupLookups collectFirst {
               case LdapGroupLookup(groupDn, filter) =>
                 logger.debug(s"searching for the user=$username (dn=$dn) within the groups in groupDn=$groupDn filter=$filter args=${args.mkString("[", ", ", "]")}")
-                val result = try {
+                try {
                   ctx.search(groupDn, filter, args, searchControls)
+                    .asScala.collect { case group => group.getNameInNamespace }.toSeq
                 } catch {
                   case e: javax.naming.directory.InvalidSearchFilterException if !ctx.getEnvironment.containsKey("java.naming.ldap.version") =>
                     logger.warn(s"group search failed ${e.getMessage}, try setting LDAP_PROTOCOL_VERSION=3 in your config if you are using ActiveDirectory", e)
-                    Seq.empty[SearchResult].asInstanceOf[NamingEnumeration[SearchResult]]
+                    Seq.empty[String]
                   case ExceptionUtils.NonFatal(e) =>
                     logger.warn(s"group search groupDn=$groupDn filter=$filter args=${args.mkString("[", ", ", "]")} failed, ${e.getMessage}", e)
-                    Seq.empty[SearchResult].asInstanceOf[NamingEnumeration[SearchResult]]
+                    Seq.empty[String]
                 }
-                result.asScala.collect {
-                  case group => group.getNameInNamespace
-                }.toSeq
             } match {
               case Some(groups) if groups.nonEmpty =>
                 logger.debug(s"user=$username dn=$dn is a member of ${groups.length} groups=${groups.mkString("[", ", ", "]")}")
@@ -274,19 +270,30 @@ object LdapBindLocalLogin {
 
   //  private def ldapConfigFromEnv(kind: AuthenticationMethod.Value): Option[LdapAuthConfig] = {
   private def ldapConfigFromEnv(): Option[LdapAuthConfig] = {
+    def trimDoubleQuotes(text: Option[String]): Option[String] = text match {
+      case Some(text) =>
+        val textLength = text.length
+        if (textLength >= 2 && text.charAt(0) == '"' && text.charAt(textLength - 1) == '"')
+          Some(text.substring(1, textLength - 1)) else Some(text)
+      case None =>
+        None
+    }
+
+    def envget(key: String): Option[String] = trimDoubleQuotes(sys.env.get(key))
+
       Some(LdapAuthConfig(
-        ldapDomainName = sys.env.get("LDAP_DOMAIN_NAME"),
-        ldapAuthProviderUrl = sys.env.get("LDAP_AUTH_PROVIDER_URL"),
-        ldapAuthProviderCert = sys.env.get("LDAP_AUTH_PROVIDER_CERT"),
-        ldapAuthPrincipal = sys.env.get("LDAP_AUTH_PRINCIPAL"),
-        ldapAuthPrincipalsRegex = sys.env.get("LDAP_AUTH_PRINCIPALS_REGEX"),
-        ldapSearchBindName = sys.env.get("LDAP_SEARCH_BIND_NAME"),
-        ldapSearchBindPassword = sys.env.get("LDAP_SEARCH_BIND_PASSWORD"),
-        ldapSearchDomainName = sys.env.get("LDAP_SEARCH_DOMAIN_NAME"),
-        ldapSearchBaseDn = sys.env.get("LDAP_SEARCH_BASE_DN"),
-        ldapSearchFilter = sys.env.get("LDAP_SEARCH_FILTER"),
-        ldapGroupBaseDn = sys.env.get("LDAP_GROUP_BASE_DN"),
-        ldapGroupFilter = sys.env.get("LDAP_GROUP_FILTER")))
+        ldapDomainName = envget("LDAP_DOMAIN_NAME"),
+        ldapAuthProviderUrl = envget("LDAP_AUTH_PROVIDER_URL"),
+        ldapAuthProviderCert = envget("LDAP_AUTH_PROVIDER_CERT"),
+        ldapAuthPrincipal = envget("LDAP_AUTH_PRINCIPAL"),
+        ldapAuthPrincipalsRegex = envget("LDAP_AUTH_PRINCIPALS_REGEX"),
+        ldapSearchBindName = envget("LDAP_SEARCH_BIND_NAME"),
+        ldapSearchBindPassword = envget("LDAP_SEARCH_BIND_PASSWORD"),
+        ldapSearchDomainName = envget("LDAP_SEARCH_DOMAIN_NAME"),
+        ldapSearchBaseDn = envget("LDAP_SEARCH_BASE_DN"),
+        ldapSearchFilter = envget("LDAP_SEARCH_FILTER"),
+        ldapGroupBaseDn = envget("LDAP_GROUP_BASE_DN"),
+        ldapGroupFilter = envget("LDAP_GROUP_FILTER")))
     }
 
 }
