@@ -11,6 +11,7 @@ import javax.naming.directory.{ InitialDirContext, SearchControls }
 import org.slf4j.LoggerFactory
 
 import scala.collection.JavaConverters._
+import scala.util.Try
 
 sealed abstract class LdapConnectionMethod(url: String) {
   def env(): Map[String, String] = {
@@ -158,99 +159,120 @@ object LdapBindLocalLogin {
     logger.debug(s"ldap login for user=$username starting...")
     var ctx: InitialDirContext = null
 
-    try {
-      (ldapAuth.principals.map {
-        case LdapKnownPrincipal(principal) =>
-          Some(principal.replace("HUMIOUSERNAME", username))
-        case LdapPrincipalSearch(searchBindName, searchBindNamePassword, dn, filter, transformUsernameToPrincipal) =>
-          val env = ldapEnv(url, searchBindName, searchBindNamePassword, ldapAuth.conn.env())
-          val searchControls = new SearchControls()
-          searchControls.setReturningAttributes(Array("dn"))
-          searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE)
-          val args: Array[AnyRef] = Seq(transformUsernameToPrincipal(username)).toArray
-          try {
-            logger.debug(s"initial dir context env=$env")
-            val searchCtx = new InitialDirContext(env)
-            try {
-              logger.debug(s"search: base=$dn filter=$filter args=${args.mkString("[", ", ", "]")}")
-              val r = searchCtx.search(dn, filter, args, searchControls)
-              if (r.hasMore) {
-                val searchResult = r.next
-                val dn = searchResult.getNameInNamespace
-                logger.debug(s"searching for user=$username in dn=$dn filter=$filter produced dn=$dn")
-                Some(dn)
-              } else {
-                None
-              }
-            } finally {
-              searchCtx.close()
-            }
-          } catch {
-            case e: NamingException =>
-              // We may try many different combinations when searching so we expect some to fail.
-              logger.debug(s"rejected dn=$dn filter=$filter args=${args.mkString("[", ", ", "]")} reason=${e.getMessage}")
-              None
+    def isServerAvailable(url: String): Boolean = {
+      import java.net.Socket
+      val pattern = """^ldaps?://([^:]+)(:([0-9]+))?$""".r
+      pattern.findFirstMatchIn(url) match {
+        case Some(result) =>
+          val host = result.group(1)
+          val port = Option(result.group(3)) match {
+            case Some(p) => Try(p.toInt).getOrElse(389)
+            case None => 389
           }
-      } collectFirst {
-        case Some(dn) if {
-          try {
-            val env = ldapEnv(url, dn, password, ldapAuth.conn.env())
-            ctx = new InitialDirContext(env)
-            true
-          } catch {
-            case e: javax.naming.AuthenticationException =>
-              logger.warn(s"login as user=$username dn=$dn rejected: $e")
-              false
-            case ExceptionUtils.NonFatal(e) =>
-              logger.warn(s"login as user=$username dn=$dn failed: $e")
-              false
-          }
-        } => Some((ctx, dn))
-      } collect {
-        case Some((ctx: InitialDirContext, dn: String)) =>
-          logger.debug(s"login as user=$username dn=$dn succeeded")
-          if (true) { //config.autoUpdateGroupMembershipsOnSuccessfullLogin) {
-            val groupBaseDn = ldapGroupBaseDn.getOrElse(dn)
-            logger.debug(s"searching for group memberships within ldap for user=$username dn=$dn within groupBaseDn=$groupBaseDn")
-            val filter = ldapGroupFilter.getOrElse("(& (objectClass=group) (member:1.2.840.113556.1.4.1941:={0}))")
-            val groupLookups = Seq(LdapGroupLookup(groupBaseDn, filter))
-            val searchControls = new javax.naming.directory.SearchControls()
+          Try(new Socket(host, port).close()).isSuccess
+        case None =>
+          false
+      }
+    }
+
+    if (isServerAvailable(url)) {
+      try {
+        (ldapAuth.principals.map {
+          case LdapKnownPrincipal(principal) =>
+            Some(principal.replace("HUMIOUSERNAME", username))
+          case LdapPrincipalSearch(searchBindName, searchBindNamePassword, dn, filter, transformUsernameToPrincipal) =>
+            val env = ldapEnv(url, searchBindName, searchBindNamePassword, ldapAuth.conn.env())
+            val searchControls = new SearchControls()
+            searchControls.setReturningAttributes(Array("dn"))
             searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE)
-            val args: Array[AnyRef] = Seq(dn).toArray
-            groupLookups collectFirst {
-              case LdapGroupLookup(groupDn, filter) =>
-                logger.debug(s"searching for the user=$username (dn=$dn) within the groups in groupDn=$groupDn filter=$filter args=${args.mkString("[", ", ", "]")}")
-                try {
-                  ctx.search(groupDn, filter, args, searchControls)
-                    .asScala.collect { case group => group.getNameInNamespace }.toSeq
-                } catch {
-                  case e: javax.naming.directory.InvalidSearchFilterException if !ctx.getEnvironment.containsKey("java.naming.ldap.version") =>
-                    logger.warn(s"group search failed ${e.getMessage}, try setting LDAP_PROTOCOL_VERSION=3 in your config if you are using ActiveDirectory", e)
-                    Seq.empty[String]
-                  case ExceptionUtils.NonFatal(e) =>
-                    logger.warn(s"group search groupDn=$groupDn filter=$filter args=${args.mkString("[", ", ", "]")} failed, ${e.getMessage}", e)
-                    Seq.empty[String]
+            val args: Array[AnyRef] = Seq(transformUsernameToPrincipal(username)).toArray
+            try {
+              logger.debug(s"initial dir context env=$env")
+              val searchCtx = new InitialDirContext(env)
+              try {
+                logger.debug(s"search: base=$dn filter=$filter args=${args.mkString("[", ", ", "]")}")
+                val r = searchCtx.search(dn, filter, args, searchControls)
+                if (r.hasMore) {
+                  val searchResult = r.next
+                  val dn = searchResult.getNameInNamespace
+                  logger.debug(s"searching for user=$username in dn=$dn filter=$filter produced dn=$dn")
+                  Some(dn)
+                } else {
+                  None
                 }
-            } match {
-              case Some(groups) if groups.nonEmpty =>
-                logger.debug(s"user=$username dn=$dn is a member of ${groups.length} groups=${groups.mkString("[", ", ", "]")}")
-                // We've discovered a set of groups associated with this authenticated user, return their dn/groups.
-                (Some(dn), groups)
-              case _ =>
-                logger.debug(s"user=$username dn=$dn was not associated with any groups")
-                // We've found that this user has no groups, or we couldn't find them but they are authenticated so return their dn.
-                (Some(dn), Seq.empty[String])
+              } finally {
+                searchCtx.close()
+              }
+            } catch {
+              case e: NamingException =>
+                // We may try many different combinations when searching so we expect some to fail.
+                logger.debug(s"rejected dn=$dn filter=$filter args=${args.mkString("[", ", ", "]")} reason=${e.getMessage}")
+                None
             }
-          } else {
-            // Humio wasn't configured to update groups on successful login so we don't look for group membership.  The user has been authenticated, so just return that.
-            (Some(dn), Seq.empty[String])
-          }
-      })
-        // User couldn't be authenticated using provided information when this statement results in `None`.
-        .getOrElse((None, Seq.empty[String]))
-    } finally {
-      if (ctx != null)
-        ctx.close()
+        } collectFirst {
+          case Some(dn) if {
+            try {
+              val env = ldapEnv(url, dn, password, ldapAuth.conn.env())
+              ctx = new InitialDirContext(env)
+              true
+            } catch {
+              case e: javax.naming.AuthenticationException =>
+                logger.warn(s"login as user=$username dn=$dn rejected: $e")
+                false
+              case ExceptionUtils.NonFatal(e) =>
+                logger.warn(s"login as user=$username dn=$dn failed: $e")
+                false
+            }
+          } => Some((ctx, dn))
+        } collect {
+          case Some((ctx: InitialDirContext, dn: String)) =>
+            logger.debug(s"login as user=$username dn=$dn succeeded")
+            if (true) { // config.autoUpdateGroupMembershipsOnSuccessfullLogin
+              val groupBaseDn = ldapGroupBaseDn.getOrElse(dn)
+              logger.debug(s"searching for group memberships within ldap for user=$username dn=$dn within groupBaseDn=$groupBaseDn")
+              val filter = ldapGroupFilter.getOrElse("(& (objectClass=group) (member:1.2.840.113556.1.4.1941:={0}))")
+              val groupLookups = Seq(LdapGroupLookup(groupBaseDn, filter))
+              val searchControls = new javax.naming.directory.SearchControls()
+              searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE)
+              val args: Array[AnyRef] = Seq(dn).toArray
+              groupLookups collectFirst {
+                case LdapGroupLookup(groupDn, filter) =>
+                  logger.debug(s"searching for the user=$username (dn=$dn) within the groups in groupDn=$groupDn filter=$filter args=${args.mkString("[", ", ", "]")}")
+                  try {
+                    ctx.search(groupDn, filter, args, searchControls)
+                      .asScala.collect { case group => group.getNameInNamespace }.toSeq
+                  } catch {
+                    case e: javax.naming.directory.InvalidSearchFilterException if !ctx.getEnvironment.containsKey("java.naming.ldap.version") =>
+                      logger.warn(s"group search failed ${e.getMessage}, try setting LDAP_PROTOCOL_VERSION=3 in your config if you are using ActiveDirectory", e)
+                      Seq.empty[String]
+                    case ExceptionUtils.NonFatal(e) =>
+                      logger.warn(s"group search groupDn=$groupDn filter=$filter args=${args.mkString("[", ", ", "]")} failed, ${e.getMessage}", e)
+                      Seq.empty[String]
+                  }
+              } match {
+                case Some(groups) if groups.nonEmpty =>
+                  logger.debug(s"user=$username dn=$dn is a member of ${groups.length} groups=${groups.mkString("[", ", ", "]")}")
+                  // We've discovered a set of groups associated with this authenticated user, return their dn/groups.
+                  (Some(dn), groups)
+                case _ =>
+                  logger.debug(s"user=$username dn=$dn was not associated with any groups")
+                  // We've found that this user has no groups, or we couldn't find them but they are authenticated so return their dn.
+                  (Some(dn), Seq.empty[String])
+              }
+            } else {
+              // Humio wasn't configured to update groups on successful login so we don't look for group membership.  The user has been authenticated, so just return that.
+              (Some(dn), Seq.empty[String])
+            }
+        })
+          // User couldn't be authenticated using provided information when this statement results in `None`.
+          .getOrElse((None, Seq.empty[String]))
+      } finally {
+        if (ctx != null)
+          ctx.close()
+      }
+    } else {
+      logger.warn(s"authentication failed, unable to connect to LDAP server url=$url")
+      (None, Seq.empty[String])
     }
   }
 
