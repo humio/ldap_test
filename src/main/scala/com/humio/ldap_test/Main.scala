@@ -97,7 +97,7 @@ object LdapBindLocalLogin {
                 authProviderUsername = providerUsername,
                 humioUsername = requestedUsername.getOrElse(providerUsername),
                 email = Option(Option(providerUsername)))
-                logger.info(s"profile for loginService=$profile")
+                logger.info(s"authenticated username=${requestedUsername.getOrElse(providerUsername)} email=${profile.email.get} with profile for loginService=$profile")
               true // loginService.login(profile, optionals, groups)
               case _ => LocalLogin.loginFailure
             }
@@ -204,7 +204,9 @@ object LdapBindLocalLogin {
               val searchCtx = new InitialDirContext(env)
               try {
                 logger.debug(s"search: base=$dn filter=$filter args=${args.mkString("[", ", ", "]")}")
-                val (name, humioUsername) = searchCtx.search(dn, filter, args, searchControls).asScala.collect {
+                val searchResult = searchCtx.search(dn, filter, args, searchControls).asScala
+                if (!searchResult.isEmpty) {
+                  val (name, humioUsername) = searchResult.collect {
                   case result =>
                     (Option(result.getNameInNamespace), usernameAttribute match {
                       case Some(attribute) =>
@@ -216,8 +218,14 @@ object LdapBindLocalLogin {
                       case None => Option(result.getNameInNamespace)
                     })
                 }.next
-                logger.debug(s"searching for username=$username in dn=$dn filter=$filter produced name=$name humioUsername=$humioUsername")
+                if (name != humioUsername)
+                  logger.debug(s"searching for username=$username in $dn filter=$filter produced dn=$name attributed username=$humioUsername")
+                else
+                  logger.debug(s"searching for username=$username in $dn filter=$filter produced dn=$name")
                 (name, humioUsername)
+                } else {
+                  (None, Option.empty[String])
+                }
               } finally {
                 searchCtx.close()
               }
@@ -260,23 +268,28 @@ object LdapBindLocalLogin {
               val args: Array[AnyRef] = Seq(dn).toArray
               groupLookups collectFirst {
                 case LdapGroupLookup(groupDn, filter) =>
-                  logger.debug(s"searching for the username=$username (dn=$dn) within the groups in groupDn=$groupDn filter=$filter args=${args.mkString("[", ", ", "]")}")
+                  logger.debug(s"searching for the username=$username ($dn) within the groups in groupDn=$groupDn filter=$filter args=${args.mkString("[", ", ", "]")}")
                   try {
-                    ctx.search(groupDn, filter, args, searchControls).asScala.collect {
-                      case result =>
-                        groupnameAttribute match {
-                          case Some(attribute) =>
-                            Try(result.getAttributes.get(attribute).get().asInstanceOf[String]).collect {
-                              case name =>
-                                logger.debug(s"ldap search groupname attribute $attribute=$name")
-                                name
-                            }.toOption match {
-                              case Some(group) => Seq(group, result.getNameInNamespace)
-                              case None => Seq(result.getNameInNamespace)
-                            }
-                          case None => Seq(result.getNameInNamespace)
-                        }
-                    }.toSeq.flatten
+                    val searchResult = ctx.search(groupDn, filter, args, searchControls).asScala
+                    if (!searchResult.isEmpty) {
+                      searchResult.collect {
+                        case result =>
+                          groupnameAttribute match {
+                            case Some(attribute) =>
+                              Try(result.getAttributes.get(attribute).get().asInstanceOf[String]).collect {
+                                case name =>
+                                  logger.debug(s"ldap search groupname attribute $attribute=$name")
+                                  name
+                              }.toOption match {
+                                case Some(group) => Seq(group, result.getNameInNamespace)
+                                case None => Seq(result.getNameInNamespace)
+                              }
+                            case None => Seq(result.getNameInNamespace)
+                          }
+                      }.toSeq.flatten
+                    } else {
+                      Seq.empty[String]
+                    }
                   } catch {
                     case e: javax.naming.directory.InvalidSearchFilterException if !ctx.getEnvironment.containsKey("java.naming.ldap.version") =>
                       logger.warn(s"group search failed ${e.getMessage}, try setting LDAP_PROTOCOL_VERSION=3 in your config if you are using ActiveDirectory", e)
@@ -287,7 +300,11 @@ object LdapBindLocalLogin {
                   }
               } match {
                 case Some(groups) if groups.nonEmpty =>
-                  logger.debug(s"username=$username dn=$dn is a member of ${groups.length} groups=${groups.mkString("[", ", ", "]")}")
+                  if (groupnameAttribute.nonEmpty) {
+                    val a = groups filter(_.contains('='))
+                    val b = groups diff a
+                    logger.debug(s"username=$username dn=$dn is a member of ${b.length} groups=${b.sorted.mkString("[", ", ", "]")} dn=${a.sorted.mkString("[", ", ", "]")}")
+                  }
                   // We've discovered a set of groups associated with this authenticated user, return their dn/groups.
                   (Some(dn), humioUsername, groups)
                 case _ =>
@@ -380,6 +397,8 @@ object Main {
            |    LDAP_SEARCH_FILTER              (& (userPrincipalName={0})(objectCategory=user))
            |    LDAP_GROUP_BASE_DN              ou=User administration,dc=example,dc=com
            |    LDAP_GROUP_FILTER               (& (objectClass=group) (member:1.2.840.113556.1.4.1941:={0}))
+           |    LDAP_USERNAME_ATTRIBUTE         uid
+           |    LDAP_GROUPNAME_ATTRIBUTE        gid
            |
            |    Phase 1: Determine DN we need to authenticate.  When not using LdapSearch this is constructed from the
            |    login username and the LDAP_AUTH_PRINCIPAL(s).  Each one is tried in turn combined with the password.
@@ -387,10 +406,14 @@ object Main {
            |
            |    Phase 0.5: LDAP search is used to find the DN for the user by first logging into the LDAP server with
            |    a well known LDAP_SEARCH_BIND_NAME/PASSWORD.  The goal is to find the DN for the login user within
-           |    the LDAP directory server, then authenticate that against the password provided.
+           |    the LDAP directory server, then authenticate that against the password provided.  If you specify
+           |    LDAP_USERNAME_ATTRIBUTE then iff that attribute exists in the record for the user it will be
+           |    used for the username.
            |
            |    Phase 2: Assuming the DN/password authenticated next up is determining if the user belongs to any
-           |    groups.  The group membership is used for RBAC.
+           |    groups.  If you specify LDAP_GROUPNAME_ATTRIBUTE the value of this attribute will be included as
+           |    well as the DN for the group that the user is considered to be part of group membership is used
+           |    for RBAC.
            |
            |    Requires Java 11 or later.tig
          """.stripMargin)

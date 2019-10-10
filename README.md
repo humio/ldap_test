@@ -75,7 +75,7 @@ export LDAP_GROUP_BASE_DN="ou=people,dc=planetexpress,dc=com"
 export LDAP_GROUP_FILTER="(& (objectClass=Group) (member={0}))"
 ```
 
-Let's try via ldapsearch before using the ldap_test JAR:
+Let's try via ldapsearch tool before using the ldap_test JAR:
 ```shell script
 docker exec -it ldap-test ldapsearch -h 127.0.0.1 -p 389 -b "dc=planetexpress,dc=com" -w GoodNewsEveryone -D "cn=admin,dc=planetexpress,dc=com" -s sub -b "ou=people,dc=planetexpress,dc=com" "(mail=fry@planetexpress.com)" "DN"
 # extended LDIF
@@ -99,7 +99,61 @@ result: 0 Success
 
 Woot! We have searched for the DN that should be authenticated starting with the email address `fry@planetexpress.com`,
 but wait... why did we search for an email address?  Well, when you login to Humio we change the user into an email
-address.  Here's the logic we use (in `getPrincipalName()` within the `Main.scala` file):
+address unless you request that we use the value of an attribute on the user's record in LDAP
+(`LDAP_USERNAME_ATTRIBUTE`).
+
+If you're using an attribute from LDAP for the username by specifying `LDAP_USERNAME_ATTRIBUTE` then you'll need to
+consider that in your filter as well.  Here's the previous query changed to use the `uid` for username.
+
+```shell script
+docker exec -it ldap-test ldapsearch -h 127.0.0.1 -p 389 -b "dc=planetexpress,dc=com" -w GoodNewsEveryone -D "cn=admin,dc=planetexpress,dc=com" -s sub -b "ou=people,dc=planetexpress,dc=com" "(uid=fry)" "uid"
+# extended LDIF
+#
+# LDAPv3
+# base <ou=people,dc=planetexpress,dc=com> with scope subtree
+# filter: (uid=fry)
+# requesting: uid 
+#
+
+# Philip J. Fry, people, planetexpress.com
+dn: cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com
+uid: fry
+
+# search result
+search: 2
+result: 0 Success
+
+# numResponses: 2
+# numEntries: 1
+```
+
+Two things changed: the query filter became `(uid=fry)` as we're now going to match the value of that field rather than
+email and `uid` as the attribute we're seeking within the record for this user.  The result shows the `dn` and the `uid`
+and they are what we expect.
+
+```shell script
+# Philip J. Fry, people, planetexpress.com
+dn: cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com
+uid: fry
+```
+
+If your LDAP administrator tells you that all users will have an `objectClass=person` then you can be a bit more
+ specific in your search filter by combining (boolean and, `&`): `(&(objectClass=person)(uid=fry))`
+
+Eventually, in Humio config for the search filter you'll replace the value your seeking with `{0}` so that query
+would look like: `(&(objectClass=person)(uid={0}))`.
+
+If you knew that some people typed in their email and others typed their user id (`uid`) then you could match either
+by changing the filter to include both values in the search again combining the features (using boolean or, `|`):
+`(&(objectClass=person)(|(uid={0})(mail={0})))`
+
+If you specify 
+
+If you don't specify `LDAP_USERNAME_ATTRIBUTE` or if you do *and* you specify `LDAP_SEARCH_DOMAIN_NAME` then Humio
+will examine the provided username in the login and construct a new one that to use when searching.  Here's the logic:
+see the function `getPrincipalName()` within the `Main.scala` file for how we construct the username from the text
+provided by the user in the Humio login field.  In the case of LDAP Search substitute `LDAP_SEARCH_DOMAIN_NAME` for
+`LDAP_DOMAIN_NAME` below.  Here's a rough approximation of that twisty/complex logic:
 
 1. You provide `fry` and `LDAP_DOMAIN_NAME=planetexpress.com` which is transformed into `fry@planetexpress.com`, or...
 2. you provide `fry@platnetexpress.com` which contains an `@` so we just use that, or...
@@ -109,11 +163,11 @@ address.  Here's the logic we use (in `getPrincipalName()` within the `Main.scal
 
 So, in the `ldapsearch` example we had a filter `(mail=fry@planetexpress.com)` anticipating the username to email
 address translation we perform.  To make that filter work for any user we change the `fry@planetexpress.com` part
-to `{0}` so that LDAP code makes the substitution for the username.  The filter should read,
-`LDAP_SEARCH_FILTER=(& (mail={0}) (objectCategory=user))`.  If you'd like to match by user id (`uid`) then you'd
-change the filter to read, `LDAP_SEARCH_FILTER=(& (uid={0}) (objectCategory=user))` and if that's the case the
-the `LDAP_DOMAIN_NAME` must be blank (read: unset) and the user loging into Humio has to use just the
-username (e.g. `fry`).  The default search filters are:
+to `{0}` so that code makes the substitution for the username.  The filter should read,
+`LDAP_SEARCH_FILTER=(& (mail={0}) (objectClass=person))`.  If you'd like to match by user id (`uid`) then you'd
+change the filter to read, `LDAP_SEARCH_FILTER=(& (uid={0}) (objectClass=person))` and if that's the case the
+the `LDAP_DOMAIN_NAME` must be blank (read: unset) and the user logging into Humio has to use just the
+username (e.g. `fry`).  If you don't specify LDAP_SEARCH_FILTER then the two default search filters we try are:
  * `(& (userPrincipalName={0})(objectCategory=user))` and
  * `(& (sAMAccountName={0})(objectCategory=user))`
  
@@ -138,7 +192,7 @@ is just a place holder for the argument which in our case is the user's DN, or
 `cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com`.  We can test using `ldapsearch` first.
 
 ```shell script
-docker exec -it ldap-test ldapsearch -h 127.0.0.1 -p 389 -b "dc=planetexpress,dc=com" -w GoodNewsEveryone -D "cn=admin,dc=planetexpress,dc=com" -s sub -b "ou=people,dc=planetexpress,dc=com" "(& (objectClass=Group) (member=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com))"
+docker exec -it ldap-test ldapsearch -h 127.0.0.1 -p 389 -b "dc=planetexpress,dc=com" -w GoodNewsEveryone -D "cn=admin,dc=planetexpress,dc=com" -s sub -b "ou=people,dc=planetexpress,dc=com" "(& (objectClass=group) (member=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com))"
 # extended LDIF
 #
 # LDAPv3
@@ -157,6 +211,31 @@ member: cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com
 member: cn=Turanga Leela,ou=people,dc=planetexpress,dc=com
 member:: Y249QmVuZGVyIEJlbmRpbmcgUm9kcsOtZ3VleixvdT1wZW9wbGUsZGM9cGxhbmV0ZXhwc
  mVzcyxkYz1jb20=
+
+# search result
+search: 2
+result: 0 Success
+
+# numResponses: 2
+# numEntries: 1
+```
+
+We note that the simple common name for groups is stored in the attribute `cn`, so we'll test again requesting that
+attribute so that later we can use that for `LDAP_GROUPNAME_ATTRIBUTE`.
+
+```shell shell script
+docker exec -it ldap-test ldapsearch -h 127.0.0.1 -p 389 -b "dc=planetexpress,dc=com" -w GoodNewsEveryone -D "cn=admin,dc=planetexpress,dc=com" -s sub -b "ou=people,dc=planetexpress,dc=com" "(&(objectClass=group)(member=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com))" "cn"
+# extended LDIF
+#
+# LDAPv3
+# base <ou=people,dc=planetexpress,dc=com> with scope subtree
+# filter: (&(objectClass=group)(member=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com))
+# requesting: cn 
+#
+
+# ship_crew, people, planetexpress.com
+dn: cn=ship_crew,ou=people,dc=planetexpress,dc=com
+cn: ship_crew
 
 # search result
 search: 2
@@ -219,7 +298,7 @@ $ sbt
   [info] Done packaging.
   [success] Total time: 7 s, completed Aug 28, 2019, 10:29:30 AM
 ```
-Should compile and produce the uber Java archive (JAR) `target/scala-2.12/ldap-test-assembly-0.4.0-SNAPSHOT.jar`.  The steps
+Should compile and produce the combined Java archive (JAR) `target/scala-2.12/ldap-test-assembly-0.4.0-SNAPSHOT.jar`.  The steps
 are:
  * `sbt clean`
  * `sbt assembly`
@@ -227,68 +306,82 @@ are:
 # Putting it all together and using the test JAR to validate
 
 We're going to test as if someone typed user `fry` with password `fry` into Humio using the test JAR using first `sbt`
-to run it the program.
+to run it the program.  This example does not include `LDAP_SEARCH_DOMAIN_NAME` and so we'll search within LDAP for
+`fry` when trying to identify this user.
 
 ```shell script
-$ env AUTHENTICATION_METHOD=ldap-search LDAP_DOMAIN_NAME=planetexpress.com LDAP_AUTH_PROVIDER_URL="ldap://127.0.0.1:389" LDAP_SEARCH_BIND_NAME="cn=admin,dc=planetexpress,dc=com" LDAP_SEARCH_BIND_PASSWORD="GoodNewsEveryone" LDAP_SEARCH_FILTER="(& (mail={0}) (objectClass=person))" LDAP_SEARCH_BASE_DN="ou=people,dc=planetexpress,dc=com" LDAP_GROUP_BASE_DN="ou=people,dc=planetexpress,dc=com" LDAP_GROUP_FILTER="(& (objectClass=Group) (member={0}))" sbt '; set javaOptions ++= Seq("-Dlog4j.configuration=file:/resources/log4j_dev.properties", "-Dlog4j.appender.console.immediateFlush=true") ;runMain com.humio.ldap_test.Main fry@planetexpress.com fry'
-  [info] Loading settings for project global-plugins from metals.sbt ...
-  [info] Loading global plugins from /home/user/.sbt/1.0/plugins
-  [info] Loading settings for project ldap_test-build from plugins.sbt ...
-  [info] Loading project definition from /your/cwd/ldap_test/project
-  [info] Loading settings for project root from build.sbt ...
-  [info] Set current project to ldap-test (in build file:/your/cwd/ldap_test/)
-  error: error while loading String, class file '/modules/java.base/java/lang/String.class' is broken
-  (class java.lang.NullPointerException/null)
-  [info] Defining javaOptions
-  [info] The new value will be used by Compile / forkOptions, Compile / run / forkOptions and 8 others.
-  [info] 	Run `last` for details.
-  [info] Reapplying settings...
-  [info] Set current project to ldap-test (in build file:/your/cwd/ldap_test/)
-  [info] Formatting 1 Scala source ProjectRef(uri("file:/your/cwd/ldap_test/"), "root")(compile) ...
-  [warn] Scalariform parser error for /your/cwd/ldap_test/src/main/scala/com/humio/ldap_test/Main.scala: illegal start of simple expression: Token(RPAREN,),692,))
-  [info] Compiling 1 Scala source to /your/cwd/ldap_test/target/scala-2.12/classes ...
-  [info] Done compiling.
-  WARNING: An illegal reflective access operation has occurred
-  WARNING: Illegal reflective access by com.google.protobuf.UnsafeUtil (file:/home/user/.sbt/boot/scala-2.12.7/org.scala-sbt/sbt/1.2.8/protobuf-java-3.3.1.jar) to field java.nio.Buffer.address
-  WARNING: Please consider reporting this to the maintainers of com.google.protobuf.UnsafeUtil
-  WARNING: Use --illegal-access=warn to enable warnings of further illegal reflective access operations
-  WARNING: All illegal access operations will be denied in a future release
-  [info] Packaging /your/cwd/ldap_test/target/scala-2.12/ldap-test_2.12-0.4.0-SNAPSHOT.jar ...
-  [info] Done packaging.
-  [info] Running (fork) com.humio.ldap_test.Main fry@planetexpress.com fry
-  [info] 2019-08-27 14:28:17,743 INFO [main] c.h.l.Main$ [Main.scala:314]	Testing LDAP login for user=fry@planetexpress.com
-  [info] 2019-08-27 14:28:17,930 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:68]	AUTHENTICATION_METHOD=LdapSearch
-  [info] 2019-08-27 14:28:17,987 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:78]	ldapAuthConfig=Some(LdapAuthConfig(Some(ldap://127.0.0.1:389),None,Some(planetexpress.com),None,None,Some(cn=admin,dc=planetexpress,dc=com),Some(GoodNewsEveryone),Some(ou=people,dc=planetexpress,dc=com),None,Some((& (mail={0}) (objectClass=person))),Some(ou=people,dc=planetexpress,dc=com),Some((& (objectClass=Group) (member={0})))))
-  [info] 2019-08-27 14:28:18,000 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:158]	ldap login for user=fry@planetexpress.com starting...
-  [info] 2019-08-27 14:28:18,006 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:171]	initial dir context env={java.naming.factory.initial=com.sun.jndi.ldap.LdapCtxFactory, java.naming.provider.url=ldap://127.0.0.1:389, java.naming.security.principal=cn=admin,dc=planetexpress,dc=com, java.naming.security.authentication=simple, java.naming.security.credentials=GoodNewsEveryone}
-  [info] 2019-08-27 14:28:18,045 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:174]	search: base=ou=people,dc=planetexpress,dc=com filter=(& (mail={0}) (objectClass=person)) args=List(fry@planetexpress.com)
-  [info] 2019-08-27 14:28:18,059 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:179]	searching for user=fry@planetexpress.com in dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com filter=(& (mail={0}) (objectClass=person)) produced dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com
-  [info] 2019-08-27 14:28:18,063 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:209]	login as user=fry@planetexpress.com dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com succeeded
-  [info] 2019-08-27 14:28:18,064 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:212]	searching for group memberships within ldap for user=fry@planetexpress.com dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com within groupBaseDn=ou=people,dc=planetexpress,dc=com
-  [info] 2019-08-27 14:28:18,065 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:221]	searching for the user=fry@planetexpress.com (dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com) within the groups in dn=ou=people,dc=planetexpress,dc=com filter=(& (objectClass=Group) (member={0})) args=[Ljava.lang.Object;@19d37183
-  [info] 2019-08-27 14:28:18,084 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:227]	user=fry@planetexpress.com dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com is a member of 1 groups=[cn=ship_crew,ou=people,dc=planetexpress,dc=com]
-  [info] 2019-08-27 14:28:18,087 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:95]	profile for loginService=AuthProviderProfile(Static,fry@planetexpress.com,fry@planetexpress.com,None,None,None,None,None,None)
-  [info] 2019-08-27 14:28:18,087 INFO [main] c.h.l.Main$ [Main.scala:317]	Fantastic, that seems to have worked.
-  [success] Total time: 6 s, completed Aug 27, 2019, 2:28:18 PM
+$ env AUTHENTICATION_METHOD=ldap-search LDAP_USERNAME_ATTRIBUTE=uid LDAP_GROUPNAME_ATTRIBUTE=cn LDAP_DOMAIN_NAME=planetexpress.com LDAP_AUTH_PROVIDER_URL="ldap://127.0.0.1:389" LDAP_SEARCH_BIND_NAME="cn=admin,dc=planetexpress,dc=com" LDAP_SEARCH_BIND_PASSWORD="GoodNewsEveryone" LDAP_SEARCH_FILTER="(&(objectClass=person)(|(uid={0})(mail={0})))" LDAP_SEARCH_BASE_DN="ou=people,dc=planetexpress,dc=com" LDAP_GROUP_BASE_DN="ou=people,dc=planetexpress,dc=com" LDAP_GROUP_FILTER="(& (objectClass=group) (member={0}))" sbt '; set javaOptions ++= Seq("-Dlog4j.configuration=file:/resources/log4j_dev.properties", "-Dlog4j.appender.console.immediateFlush=true") ;runMain com.humio.ldap_test.Main fry fry'
+...
+[info] running (fork) com.humio.ldap_test.Main fry fry
+[info] 2019-10-10 10:15:12,289 INFO [main] c.h.l.Main$ [Main.scala:421] Testing LDAP login for user=fry
+[info] 2019-10-10 10:15:12,415 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:69]    AUTHENTICATION_METHOD=LdapSearch
+[info] 2019-10-10 10:15:12,482 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:79]    ldapAuthConfig=Some(LdapAuthConfig(Some(ldap://127.0.0.1:389),None,Some(planetexpress.com),None,None,Some(cn=admin,dc=planetexpress,dc=com),Some(GoodNewsEveryone),Some(ou=people,dc=planetexpress,dc=com),None,Some((&(objectClass=person)(|(uid={0})(mail={0})))),Some(ou=people,dc=planetexpress,dc=com),Some((& (objectClass=group) (member={0})))))
+[info] 2019-10-10 10:15:12,491 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:166]  ldap login for username=fry starting...
+[info] 2019-10-10 10:15:12,529 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:203]  initial dir context env={java.naming.factory.initial=com.sun.jndi.ldap.LdapCtxFactory, java.naming.provider.url=ldap://127.0.0.1:389, java.naming.security.principal=cn=admin,dc=planetexpress,dc=com, java.naming.security.authentication=simple, java.naming.security.credentials=GoodNewsEveryone}
+[info] 2019-10-10 10:15:12,560 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:206]  search: base=ou=people,dc=planetexpress,dc=com filter=(&(objectClass=person)(|(uid={0})(mail={0}))) args=[fry]
+[info] 2019-10-10 10:15:12,575 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:215]  ldap search username attribute uid=fry
+[info] 2019-10-10 10:15:12,575 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:222]  searching for username=fry in ou=people,dc=planetexpress,dc=com filter=(&(objectClass=person)(|(uid={0})(mail={0}))) produced dn=Some(cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com) attributed username=Some(fry)
+[info] 2019-10-10 10:15:12,578 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:255]  login as username=fry dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com succeeded
+[info] 2019-10-10 10:15:12,579 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:258]	searching for group memberships within ldap for username=fry dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com within groupBaseDn=ou=people,dc=planetexpress,dc=com
+[info] 2019-10-10 10:15:12,580 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:271]	searching for the username=fry (dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com) within the groups in groupDn=ou=people,dc=planetexpress,dc=com filter=(& (objectClass=group) (member={0})) args=[cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com]
+[info] 2019-10-10 10:15:12,582 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:281]	ldap search groupname attribute cn=ship_crew
+[info] 2019-10-10 10:15:12,595 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:306]	username=fry dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com is a member of 1 groups=[ship_crew] groupDns=[cn=ship_crew,ou=people,dc=planetexpress,dc=com]
+[info] 2019-10-10 10:15:12,598 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:100]	authenticated username=fry email=Some(fry@planetexpress.com) with profile for loginService=AuthProviderProfile(Static,fry@planetexpress.com,fry,Some(Some(fry@planetexpress.com)),None,None,None,None,None)
+[info] 2019-10-10 10:15:12,598 INFO [main] c.h.l.Main$ [Main.scala:424]	Fantastic, that seems to have worked.
 ```
 
-Cool.  Next using `java -jar ...`
+In this next example we change one thing, we provide `LDAP_SEARCH_DOMAIN_NAME=planetexpress.com` which will change what
+we search for when locating the user's record in LDAP from `fry` to `fry@planetexpress.com`.  Good thing our search
+filter checks both `uid` and `mail`, this time we'll match on `mail`.
 
 ```shell script
-env AUTHENTICATION_METHOD=ldap-search LDAP_DOMAIN_NAME=planetexpress.com LDAP_AUTH_PROVIDER_URL="ldap://127.0.0.1:389" LDAP_SEARCH_BIND_NAME="cn=admin,dc=planetexpress,dc=com" LDAP_SEARCH_BIND_PASSWORD="GoodNewsEveryone" LDAP_SEARCH_FILTER="(& (mail={0}) (objectClass=person))" LDAP_SEARCH_BASE_DN="ou=people,dc=planetexpress,dc=com" LDAP_GROUP_BASE_DN="ou=people,dc=planetexpress,dc=com" LDAP_GROUP_FILTER="(& (objectClass=Group) (member={0}))" java -jar ldap-test.jar fry@planetexpress.com fry
-2019-08-28 10:32:14,235 INFO [main] c.h.l.Main$ [Main.scala:314]	Testing LDAP login for user=fry@planetexpress.com
-2019-08-28 10:32:14,444 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:68]	AUTHENTICATION_METHOD=LdapSearch
-2019-08-28 10:32:14,521 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:78]	ldapAuthConfig=Some(LdapAuthConfig(Some(ldap://127.0.0.1:389),None,Some(planetexpress.com),None,None,Some(cn=admin,dc=planetexpress,dc=com),Some(GoodNewsEveryone),Some(ou=people,dc=planetexpress,dc=com),None,Some((& (mail={0}) (objectClass=person))),Some(ou=people,dc=planetexpress,dc=com),Some((& (objectClass=Group) (member={0})))))
-2019-08-28 10:32:14,538 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:158]	ldap login for user=fry@planetexpress.com starting...
-2019-08-28 10:32:14,550 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:171]	initial dir context env={java.naming.factory.initial=com.sun.jndi.ldap.LdapCtxFactory, java.naming.provider.url=ldap://127.0.0.1:389, java.naming.security.principal=cn=admin,dc=planetexpress,dc=com, java.naming.security.authentication=simple, java.naming.security.credentials=GoodNewsEveryone}
-2019-08-28 10:32:14,610 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:174]	search: base=ou=people,dc=planetexpress,dc=com filter=(& (mail={0}) (objectClass=person)) args=List(fry@planetexpress.com)
-2019-08-28 10:32:14,626 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:179]	searching for user=fry@planetexpress.com in dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com filter=(& (mail={0}) (objectClass=person)) produced dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com
-2019-08-28 10:32:14,631 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:209]	login as user=fry@planetexpress.com dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com succeeded
-2019-08-28 10:32:14,631 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:212]	searching for group memberships within ldap for user=fry@planetexpress.com dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com within groupBaseDn=ou=people,dc=planetexpress,dc=com
-2019-08-28 10:32:14,632 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:221]	searching for the user=fry@planetexpress.com (dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com) within the groups in dn=ou=people,dc=planetexpress,dc=com filter=(& (objectClass=Group) (member={0})) args=[Ljava.lang.Object;@2aa5fe93
-2019-08-28 10:32:14,648 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:227]	user=fry@planetexpress.com dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com is a member of 1 groups=[cn=ship_crew,ou=people,dc=planetexpress,dc=com]
-2019-08-28 10:32:14,651 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:95]	profile for loginService=AuthProviderProfile(Static,fry@planetexpress.com,fry@planetexpress.com,None,None,None,None,None,None)
-2019-08-28 10:32:14,651 INFO [main] c.h.l.Main$ [Main.scala:317]	Fantastic, that seems to have worked.
+env AUTHENTICATION_METHOD=ldap-search LDAP_USERNAME_ATTRIBUTE=uid LDAP_GROUPNAME_ATTRIBUTE=cn LDAP_DOMAIN_NAME=planetexpress.com LDAP_AUTH_PROVIDER_URL="ldap://127.0.0.1:389" LDAP_SEARCH_DOMAIN_NAME=planetexpress.com LDAP_SEARCH_BIND_NAME="cn=admin,dc=planetexpress,dc=com" LDAP_SEARCH_BIND_PASSWORD="GoodNewsEveryone" LDAP_SEARCH_FILTER="(&(objectClass=person)(|(uid={0})(mail={0})))" LDAP_SEARCH_BASE_DN="ou=people,dc=planetexpress,dc=com" LDAP_GROUP_BASE_DN="ou=people,dc=planetexpress,dc=com" LDAP_GROUP_FILTER="(& (objectClass=group) (member={0}))" sbt '; set javaOptions ++= Seq("-Dlog4j.configuration=file:/resources/log4j_dev.properties", "-Dlog4j.appender.console.immediateFlush=true") ;runMain com.humio.ldap_test.Main fry fry'
+...
+[info] running (fork) com.humio.ldap_test.Main fry fry
+[info] 2019-10-10 10:25:28,038 INFO [main] c.h.l.Main$ [Main.scala:421] Testing LDAP login for user=fry
+[info] 2019-10-10 10:25:28,263 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:69]    AUTHENTICATION_METHOD=LdapSearch
+[info] 2019-10-10 10:25:28,350 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:79]    ldapAuthConfig=Some(LdapAuthConfig(Some(ldap://127.0.0.1:389),None,Some(planetexpress.com),None,None,Some(cn=admin,dc=planetexpress,dc=com),Some(GoodNewsEveryone),Some(ou=people,dc=planetexpress,dc=com),Some(planetexpress.com),Some((&(objectClass=person)(|(uid={0})(mail={0})))),Some(ou=people,dc=planetexpress,dc=com),Some((& (objectClass=group) (member={0})))))
+[info] 2019-10-10 10:25:28,361 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:166]  ldap login for username=fry starting...
+[info] 2019-10-10 10:25:28,403 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:203]  initial dir context env={java.naming.factory.initial=com.sun.jndi.ldap.LdapCtxFactory, java.naming.provider.url=ldap://127.0.0.1:389, java.naming.security.principal=cn=admin,dc=planetexpress,dc=com, java.naming.security.authentication=simple, java.naming.security.credentials=GoodNewsEveryone}
+[info] 2019-10-10 10:25:28,463 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:206]  search: base=ou=people,dc=planetexpress,dc=com filter=(&(objectClass=person)(|(uid={0})(mail={0}))) args=[fry@planetexpress.com]
+[info] 2019-10-10 10:25:28,485 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:215]  ldap search username attribute uid=fry
+[info] 2019-10-10 10:25:28,485 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:222]  searching for username=fry in ou=people,dc=planetexpress,dc=com filter=(&(objectClass=person)(|(uid={0})(mail={0}))) produced dn=Some(cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com) attributed username=Some(fry)
+[info] 2019-10-10 10:25:28,488 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:255]  login as username=fry dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com succeeded
+[info] 2019-10-10 10:25:28,489 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:258]	searching for group memberships within ldap for username=fry dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com within groupBaseDn=ou=people,dc=planetexpress,dc=com
+[info] 2019-10-10 10:25:28,490 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:271]	searching for the username=fry (cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com) within the groups in groupDn=ou=people,dc=planetexpress,dc=com filter=(& (objectClass=group) (member={0})) args=[cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com]
+[info] 2019-10-10 10:25:28,492 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:281]	ldap search groupname attribute cn=ship_crew
+[info] 2019-10-10 10:25:28,521 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:306]	username=fry dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com is a member of 1 groups=[ship_crew] dn=[cn=ship_crew,ou=people,dc=planetexpress,dc=com]
+[info] 2019-10-10 10:25:28,526 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:100]	authenticated username=fry email=Some(fry@planetexpress.com) with profile for loginService=AuthProviderProfile(Static,fry@planetexpress.com,fry,Some(Some(fry@planetexpress.com)),None,None,None,None,None)
+[info] 2019-10-10 10:25:28,526 INFO [main] c.h.l.Main$ [Main.scala:424]	Fantastic, that seems to have worked.
+```
+
+Here's the line from above that shows the difference:
+```shell script
+[info] 2019-10-10 10:25:28,463 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:206]  search: base=ou=people,dc=planetexpress,dc=com filter=(&(objectClass=person)(|(uid={0})(mail={0}))) args=[fry@planetexpress.com]
+```
+
+Note `args` in this case is `fry@planetexpress.com` whereas before, without having set `LDAP_SEARCH_DOMAIN_NAME` it was
+simply `args=[fry]`.
+
+Cool.  Next using `java -jar ...` without `LDAP_SEARCH_DOMAIN_NAME` set as before.
+
+```shell script
+env AUTHENTICATION_METHOD=ldap-search LDAP_USERNAME_ATTRIBUTE=uid LDAP_GROUPNAME_ATTRIBUTE=cn LDAP_DOMAIN_NAME=planetexpress.com LDAP_AUTH_PROVIDER_URL="ldap://127.0.0.1:389" LDAP_SEARCH_BIND_NAME="cn=admin,dc=planetexpress,dc=com" LDAP_SEARCH_BIND_PASSWORD="GoodNewsEveryone" LDAP_SEARCH_FILTER="(&(objectClass=person)(|(uid={0})(mail={0})))" LDAP_SEARCH_BASE_DN="ou=people,dc=planetexpress,dc=com" LDAP_GROUP_BASE_DN="ou=people,dc=planetexpress,dc=com" LDAP_GROUP_FILTER="(& (objectClass=group) (member={0}))" java -jar target/scala-2.12/ldap-test-assembly-0.4.0-SNAPSHOT.jar fry fry
+2019-10-10 10:35:02,764 INFO [main] c.h.l.Main$ [Main.scala:421]	Testing LDAP login for user=fry
+2019-10-10 10:35:02,927 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:69]	AUTHENTICATION_METHOD=LdapSearch
+2019-10-10 10:35:03,015 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:79]	ldapAuthConfig=Some(LdapAuthConfig(Some(ldap://127.0.0.1:389),None,Some(planetexpress.com),None,None,Some(cn=admin,dc=planetexpress,dc=com),Some(GoodNewsEveryone),Some(ou=people,dc=planetexpress,dc=com),None,Some((&(objectClass=person)(|(uid={0})(mail={0})))),Some(ou=people,dc=planetexpress,dc=com),Some((& (objectClass=group) (member={0})))))
+2019-10-10 10:35:03,026 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:166]	ldap login for username=fry starting...
+2019-10-10 10:35:03,071 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:203]	initial dir context env={java.naming.factory.initial=com.sun.jndi.ldap.LdapCtxFactory, java.naming.provider.url=ldap://127.0.0.1:389, java.naming.security.principal=cn=admin,dc=planetexpress,dc=com, java.naming.security.authentication=simple, java.naming.security.credentials=GoodNewsEveryone}
+2019-10-10 10:35:03,119 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:206]	search: base=ou=people,dc=planetexpress,dc=com filter=(&(objectClass=person)(|(uid={0})(mail={0}))) args=[fry]
+2019-10-10 10:35:03,149 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:215]	ldap search username attribute uid=fry
+2019-10-10 10:35:03,149 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:222]	searching for username=fry in ou=people,dc=planetexpress,dc=com filter=(&(objectClass=person)(|(uid={0})(mail={0}))) produced dn=Some(cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com) attributed username=Some(fry)
+2019-10-10 10:35:03,153 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:255]	login as username=fry dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com succeeded
+2019-10-10 10:35:03,154 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:258]	searching for group memberships within ldap for username=fry dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com within groupBaseDn=ou=people,dc=planetexpress,dc=com
+2019-10-10 10:35:03,155 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:271]	searching for the username=fry (dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com) within the groups in groupDn=ou=people,dc=planetexpress,dc=com filter=(& (objectClass=group) (member={0})) args=[cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com]
+2019-10-10 10:35:03,157 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:281]	ldap search groupname attribute cn=ship_crew
+2019-10-10 10:35:03,175 DEBUG [main] c.h.l.LdapBindLocalLogin$ [Main.scala:306]	username=fry dn=cn=Philip J. Fry,ou=people,dc=planetexpress,dc=com is a member of 1 groups=[ship_crew] groupDns=[cn=ship_crew,ou=people,dc=planetexpress,dc=com]
+2019-10-10 10:35:03,184 INFO [main] c.h.l.LdapBindLocalLogin$ [Main.scala:100]	authenticated username=fry email=Some(fry@planetexpress.com) with profile for loginService=AuthProviderProfile(Static,fry@planetexpress.com,fry,Some(Some(fry@planetexpress.com)),None,None,None,None,None)
+2019-10-10 10:35:03,184 INFO [main] c.h.l.Main$ [Main.scala:424]	Fantastic, that seems to have worked.
 ```
 
 Fantastic, that seems to have worked.  We authenticated with the OpenLDAP instance using `admin`'s credentials and
@@ -320,7 +413,7 @@ $ cat > .env <<EOF
 EOF
 $ docker pull humio/humio-ldap-test:latest
 latest: Pulling from humio/humio-ldap-test
-Digest: sha256:1f76c4c87bb92b2e44ce8a986cdc63a1fb0a488bdd31ccfd5acfd37802f00ee2
+Digest: sha256:3141af6f5e8b033b8412b7350cf2b00e2a97194fbe0d692ca8a232ad13ac2c7f
 Status: Image is up to date for humio/humio-ldap-test:latest
 $ docker run -it --rm --env-file .env humio/humio-ldap-test fry fry
 ```
