@@ -10,7 +10,7 @@ lazy val root = (project in file(".")).
   settings(
     inThisBuild(List(
       organization := "com.humio",
-      scalaVersion := "2.12.9",
+      scalaVersion := "2.12.10",
 //      crossScalaVersions := Seq("2.12.7", "2.12.8", "2.13.0-RC1"),
       version      := "0.4.0-SNAPSHOT"
     ))
