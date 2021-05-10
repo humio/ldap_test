@@ -404,7 +404,7 @@ $ cat > .env <<EOF
   AUTHENTICATION_METHOD=ldap-search
   LDAP_DOMAIN_NAME=planetexpress.com
   LDAP_AUTH_PROVIDER_URL="ldap://127.0.0.1:389"
-  LDAP_SEARCH_BIND_NAME="cn=admin,ou=people,dc=planetexpress,dc=com"
+  LDAP_SEARCH_BIND_NAME="cn=admin,dc=planetexpress,dc=com"
   LDAP_SEARCH_BIND_PASSWORD="GoodNewsEveryone"
   LDAP_SEARCH_FILTER="(& (mail={0}) (objectClass=person))"
   LDAP_SEARCH_BASE_DN="ou=people,dc=planetexpress,dc=com"
@@ -415,5 +415,5 @@ $ docker pull humio/humio-ldap-test:latest
 latest: Pulling from humio/humio-ldap-test
 Digest: sha256:0805d349746ca99bfc1ed728854ce8ca34f7ce9a22f76314da6fdda4ae4584e3
 Status: Image is up to date for humio/humio-ldap-test:latest
-$ docker run -it --rm --env-file .env humio/humio-ldap-test fry fry
+$ docker run -it --rm --env-file .env humio/humio-ldap-test fry@planetexpress.com fry
 ```
